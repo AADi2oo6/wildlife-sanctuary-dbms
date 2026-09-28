@@ -67,6 +67,35 @@ class TelemetryPayload(BaseModel):
         None,
         description="URL or path to captured raw audio snippet for AI analysis"
     )
+    image_snapshot_url: Optional[str] = Field(
+        None,
+        description="URL or path to captured optical camera snapshot"
+    )
+    audio_ai_analysis: Optional[Any] = Field(
+        None,
+        description="Audio AI diagnostic output (threat type, confidence, reasoning)"
+    )
+    vision_ai_analysis: Optional[Any] = Field(
+        None,
+        description="Vision AI diagnostic output (detected objects, vision threat score, reasoning)"
+    )
+    vision_score: Optional[float] = Field(
+        None,
+        ge=0.0,
+        le=1.0,
+        description="Vision classification score between 0.0 and 1.0"
+    )
+    is_manual: Optional[bool] = Field(
+        False,
+        description="Whether this trigger was requested manually by operator"
+    )
+
+class NodeHardwareConfig(BaseModel):
+    com_port: Optional[str] = Field(None, description="Host COM port (e.g. 'COM3', '/dev/ttyUSB0')")
+    baud_rate: Optional[int] = Field(115200, description="Serial baud rate, default 115200")
+    camera_url: Optional[str] = Field(None, description="ESP32-CAM Snapshot Capture URL (e.g. 'http://192.168.1.105/capture')")
+    camera_stream_url: Optional[str] = Field(None, description="ESP32-CAM Live Video Stream URL (e.g. 'http://192.168.1.105:81/stream')")
+    is_listening: Optional[bool] = Field(False, description="Whether serial bridge is actively listening")
 
 class TelemetryResponse(BaseModel):
     status: str

@@ -32,7 +32,7 @@ async def init_db_pool() -> asyncpg.Pool:
             password=password,
             database=database,
             min_size=1,
-            max_size=10,
+            max_size=3,
             command_timeout=20,
             ssl=ssl_context
         )
@@ -40,6 +40,25 @@ async def init_db_pool() -> asyncpg.Pool:
         return _pool
     except Exception as e:
         logger.error(f"❌ Failed to initialize database connection pool: {e}")
+        # Try port 6543 (transaction pooler) if port 5432 session pool limit reached
+        if "max clients reached" in str(e).lower() and port == 5432:
+            try:
+                logger.info(f"Retrying connection via Supabase transaction pooler on port 6543...")
+                _pool = await asyncpg.create_pool(
+                    host=host,
+                    port=6543,
+                    user=user,
+                    password=password,
+                    database=database,
+                    min_size=1,
+                    max_size=3,
+                    command_timeout=20,
+                    ssl=ssl_context
+                )
+                logger.info("✅ Connected to Supabase transaction pooler on port 6543!")
+                return _pool
+            except Exception as e2:
+                logger.error(f"❌ Port 6543 fallback also failed: {e2}")
         raise
 
 async def close_db_pool():
@@ -62,7 +81,8 @@ async def get_node_by_identifier(identifier: str) -> Optional[Dict[str, Any]]:
         row = await conn.fetchrow(
             """
             SELECT node_id, device_uid, name, latitude, longitude, status, 
-                   battery_level, sensor_type, notes, last_ping, zone_id, custom_area_id
+                   battery_level, sensor_type, com_port, baud_rate, camera_url, 
+                   camera_stream_url, is_listening, notes, last_ping, zone_id, custom_area_id
             FROM iot_nodes
             WHERE device_uid = $1 OR ($2::int IS NOT NULL AND node_id = $2::int)
             LIMIT 1
@@ -101,6 +121,50 @@ async def update_node_status(
         query = f"UPDATE iot_nodes SET {', '.join(updates)} WHERE node_id = $1"
         await conn.execute(query, *args)
 
+async def update_node_hardware_config(
+    node_id: int,
+    com_port: Optional[str] = None,
+    baud_rate: Optional[int] = None,
+    camera_url: Optional[str] = None,
+    camera_stream_url: Optional[str] = None,
+    is_listening: Optional[bool] = None
+) -> Dict[str, Any]:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        updates = ["updated_at = NOW()"]
+        args = [node_id]
+        idx = 2
+
+        if com_port is not None:
+            updates.append(f"com_port = ${idx}")
+            args.append(com_port)
+            idx += 1
+        if baud_rate is not None:
+            updates.append(f"baud_rate = ${idx}")
+            args.append(baud_rate)
+            idx += 1
+        if camera_url is not None:
+            updates.append(f"camera_url = ${idx}")
+            args.append(camera_url)
+            idx += 1
+        if camera_stream_url is not None:
+            updates.append(f"camera_stream_url = ${idx}")
+            args.append(camera_stream_url)
+            idx += 1
+        if is_listening is not None:
+            updates.append(f"is_listening = ${idx}")
+            args.append(is_listening)
+            idx += 1
+
+        query = f"""
+            UPDATE iot_nodes 
+            SET {', '.join(updates)} 
+            WHERE node_id = $1 
+            RETURNING node_id, device_uid, name, com_port, baud_rate, camera_url, camera_stream_url, is_listening
+        """
+        row = await conn.fetchrow(query, *args)
+        return dict(row) if row else {}
+
 async def insert_trigger_event(
     node_id: int,
     trigger_type: str,
@@ -108,17 +172,26 @@ async def insert_trigger_event(
     decibel_level: Optional[float] = None,
     confidence: Optional[float] = None,
     details: Optional[str] = None,
-    audio_sample_url: Optional[str] = None
+    audio_sample_url: Optional[str] = None,
+    image_snapshot_url: Optional[str] = None,
+    audio_ai_analysis: Optional[str] = None,
+    vision_ai_analysis: Optional[str] = None,
+    vision_score: Optional[float] = None,
+    is_manual: bool = False
 ) -> Dict[str, Any]:
     pool = get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
             INSERT INTO iot_trigger_events 
-                (node_id, trigger_type, severity, decibel_level, confidence, details, audio_sample_url, triggered_at, created_at)
+                (node_id, trigger_type, severity, decibel_level, confidence, details, 
+                 audio_sample_url, image_snapshot_url, audio_ai_analysis, vision_ai_analysis, 
+                 vision_score, is_manual, triggered_at, created_at)
             VALUES 
-                ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
-            RETURNING event_id, node_id, trigger_type, severity, decibel_level, confidence, details, triggered_at
+                ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11, $12, NOW(), NOW())
+            RETURNING event_id, node_id, trigger_type, severity, decibel_level, confidence, 
+                      details, audio_sample_url, image_snapshot_url, audio_ai_analysis, 
+                      vision_ai_analysis, vision_score, is_manual, triggered_at
             """,
             node_id,
             trigger_type,
@@ -126,7 +199,12 @@ async def insert_trigger_event(
             decibel_level,
             confidence,
             details,
-            audio_sample_url
+            audio_sample_url,
+            image_snapshot_url,
+            audio_ai_analysis,
+            vision_ai_analysis,
+            vision_score,
+            is_manual
         )
         return dict(row) if row else {}
 
@@ -137,8 +215,9 @@ async def get_recent_alerts(limit: int = 50) -> List[Dict[str, Any]]:
             """
             SELECT e.event_id, e.node_id, n.name AS node_name, n.device_uid,
                    e.trigger_type, e.severity, e.decibel_level, e.confidence, 
-                   e.details, e.audio_sample_url, e.triggered_at,
-                   n.latitude, n.longitude
+                   e.details, e.audio_sample_url, e.image_snapshot_url,
+                   e.audio_ai_analysis, e.vision_ai_analysis, e.vision_score,
+                   e.is_manual, e.triggered_at, n.latitude, n.longitude
             FROM iot_trigger_events e
             JOIN iot_nodes n ON e.node_id = n.node_id
             ORDER BY e.triggered_at DESC
@@ -153,7 +232,9 @@ async def get_node_triggers(node_id: int, limit: int = 100) -> List[Dict[str, An
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT event_id, node_id, trigger_type, severity, decibel_level, confidence, details, audio_sample_url, triggered_at
+            SELECT event_id, node_id, trigger_type, severity, decibel_level, 
+                   confidence, details, audio_sample_url, image_snapshot_url,
+                   audio_ai_analysis, vision_ai_analysis, vision_score, is_manual, triggered_at
             FROM iot_trigger_events
             WHERE node_id = $1
             ORDER BY triggered_at ASC

@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends
 from datetime import datetime, timezone
 import logging
+import json
 from typing import List, Dict, Any, Optional
 
 from models import TelemetryPayload, TelemetryResponse
@@ -85,6 +86,10 @@ async def ingest_telemetry(payload: TelemetryPayload):
         trigger_type_str = (threat.upper() if threat else "ACOUSTIC_DISTURBANCE").replace(" ", "_")
         details_str = payload.notes or f"Threat detected by edge sensor model: {threat or 'High acoustic spike'}"
 
+        # Serialize AI analysis objects if provided
+        audio_ai_json = json.dumps(payload.audio_ai_analysis) if isinstance(payload.audio_ai_analysis, (dict, list)) else payload.audio_ai_analysis
+        vision_ai_json = json.dumps(payload.vision_ai_analysis) if isinstance(payload.vision_ai_analysis, (dict, list)) else payload.vision_ai_analysis
+
         # Insert record into iot_trigger_events
         created_event = await insert_trigger_event(
             node_id=node_id,
@@ -93,7 +98,12 @@ async def ingest_telemetry(payload: TelemetryPayload):
             decibel_level=decibel,
             confidence=confidence,
             details=details_str,
-            audio_sample_url=payload.audio_sample_url
+            audio_sample_url=payload.audio_sample_url,
+            image_snapshot_url=payload.image_snapshot_url,
+            audio_ai_analysis=audio_ai_json,
+            vision_ai_analysis=vision_ai_json,
+            vision_score=payload.vision_score,
+            is_manual=payload.is_manual or False
         )
         trigger_event_id = created_event.get("event_id")
 
@@ -121,6 +131,12 @@ async def ingest_telemetry(payload: TelemetryPayload):
         "is_anomaly": is_anomaly,
         "trigger_event_id": trigger_event_id,
         "confidence": confidence,
+        "audio_sample_url": payload.audio_sample_url,
+        "image_snapshot_url": payload.image_snapshot_url,
+        "audio_ai_analysis": payload.audio_ai_analysis,
+        "vision_ai_analysis": payload.vision_ai_analysis,
+        "vision_score": payload.vision_score,
+        "is_manual": payload.is_manual or False,
         "temperature": payload.temperature,
         "humidity": payload.humidity,
         "timestamp": datetime.now(timezone.utc).isoformat()

@@ -92,6 +92,12 @@ router.post('/', async (req, res) => {
           decibel_level: decibel,
           confidence,
           details,
+          audio_sample_url: req.body.audio_sample_url || null,
+          image_snapshot_url: req.body.image_snapshot_url || null,
+          audio_ai_analysis: req.body.audio_ai_analysis || null,
+          vision_ai_analysis: req.body.vision_ai_analysis || null,
+          vision_score: req.body.vision_score ? parseFloat(req.body.vision_score) : null,
+          is_manual: Boolean(req.body.is_manual),
           triggered_at: new Date(),
         },
       });

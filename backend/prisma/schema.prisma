@@ -179,22 +179,27 @@ enum NodeStatus {
 }
 
 model IotNode {
-  node_id       Int         @id @default(autoincrement())
-  device_uid    String      @unique @db.VarChar(100)
-  name          String      @db.VarChar(150)
-  latitude      Decimal     @db.Decimal(9, 6)
-  longitude     Decimal     @db.Decimal(9, 6)
-  status        NodeStatus  @default(ACTIVE)
-  battery_level Int         @default(100)
-  sensor_type   String?     @default("ACOUSTIC_VISION") @db.VarChar(100)
-  notes         String?     @db.Text
-  last_ping     DateTime?   @default(now())
-  created_at    DateTime    @default(now())
-  updated_at    DateTime    @updatedAt
-  zone_id       Int?
-  zone          Zone?       @relation(fields: [zone_id], references: [zone_id], onDelete: SetNull)
-  custom_area_id Int?
-  custom_area    CustomArea? @relation(fields: [custom_area_id], references: [area_id], onDelete: SetNull)
+  node_id           Int         @id @default(autoincrement())
+  device_uid        String      @unique @db.VarChar(100)
+  name              String      @db.VarChar(150)
+  latitude          Decimal     @db.Decimal(9, 6)
+  longitude         Decimal     @db.Decimal(9, 6)
+  status            NodeStatus  @default(ACTIVE)
+  battery_level     Int         @default(100)
+  sensor_type       String?     @default("ACOUSTIC_VISION") @db.VarChar(100)
+  com_port          String?     @db.VarChar(50)
+  baud_rate         Int?        @default(115200)
+  camera_url        String?     @db.VarChar(255)
+  camera_stream_url String?     @db.VarChar(255)
+  is_listening      Boolean     @default(false)
+  notes             String?     @db.Text
+  last_ping         DateTime?   @default(now())
+  created_at        DateTime    @default(now())
+  updated_at        DateTime    @updatedAt
+  zone_id           Int?
+  zone              Zone?       @relation(fields: [zone_id], references: [zone_id], onDelete: SetNull)
+  custom_area_id    Int?
+  custom_area       CustomArea? @relation(fields: [custom_area_id], references: [area_id], onDelete: SetNull)
 
   trigger_events IotTriggerEvent[]
 
@@ -203,17 +208,22 @@ model IotNode {
 }
 
 model IotTriggerEvent {
-  event_id         Int      @id @default(autoincrement())
-  node_id          Int
-  node             IotNode  @relation(fields: [node_id], references: [node_id], onDelete: Cascade)
-  trigger_type     String   @db.VarChar(100)
-  severity         String   @default("ALERT") @db.VarChar(50)
-  decibel_level    Decimal? @db.Decimal(5, 2)
-  confidence       Decimal? @db.Decimal(4, 3)
-  details          String?  @db.Text
-  audio_sample_url String?  @db.VarChar(255)
-  triggered_at     DateTime @default(now())
-  created_at       DateTime @default(now())
+  event_id           Int      @id @default(autoincrement())
+  node_id            Int
+  node               IotNode  @relation(fields: [node_id], references: [node_id], onDelete: Cascade)
+  trigger_type       String   @db.VarChar(100)
+  severity           String   @default("ALERT") @db.VarChar(50)
+  decibel_level      Decimal? @db.Decimal(5, 2)
+  confidence         Decimal? @db.Decimal(4, 3)
+  details            String?  @db.Text
+  audio_sample_url   String?  @db.VarChar(255)
+  image_snapshot_url String?  @db.VarChar(255)
+  audio_ai_analysis  Json?
+  vision_ai_analysis Json?
+  vision_score       Decimal? @db.Decimal(4, 3)
+  is_manual          Boolean  @default(false)
+  triggered_at       DateTime @default(now())
+  created_at         DateTime @default(now())
 
   @@index([node_id, triggered_at])
   @@map("iot_trigger_events")

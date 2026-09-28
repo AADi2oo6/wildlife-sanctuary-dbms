@@ -560,7 +560,23 @@ export const getAllIotNodes = async (req, res) => {
 /** POST /api/admin/iot-nodes — deploy a new IoT node */
 export const createIotNode = async (req, res) => {
   try {
-    const { name, device_uid, latitude, longitude, status, battery_level, sensor_type, notes, zone_id, custom_area_id } = req.body;
+    const {
+      name,
+      device_uid,
+      latitude,
+      longitude,
+      status,
+      battery_level,
+      sensor_type,
+      notes,
+      zone_id,
+      custom_area_id,
+      com_port,
+      baud_rate,
+      camera_url,
+      camera_stream_url,
+      is_listening,
+    } = req.body;
 
     if (!name || latitude === undefined || longitude === undefined) {
       return res.status(400).json({ success: false, error: 'Node name, latitude, and longitude are required.' });
@@ -585,6 +601,11 @@ export const createIotNode = async (req, res) => {
         status: status || 'ACTIVE',
         battery_level: battery_level !== undefined ? parseInt(battery_level, 10) : 100,
         sensor_type: sensor_type || 'ACOUSTIC_VISION',
+        com_port: com_port ? com_port.trim() : null,
+        baud_rate: baud_rate ? parseInt(baud_rate, 10) : 115200,
+        camera_url: camera_url ? camera_url.trim() : null,
+        camera_stream_url: camera_stream_url ? camera_stream_url.trim() : null,
+        is_listening: Boolean(is_listening),
         notes: notes ? notes.trim() : null,
         zone_id: zone_id ? parseInt(zone_id, 10) : null,
         custom_area_id: custom_area_id ? parseInt(custom_area_id, 10) : null,
@@ -609,7 +630,20 @@ export const createIotNode = async (req, res) => {
 export const updateIotNode = async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
-    const { name, status, battery_level, sensor_type, notes, zone_id } = req.body;
+    const {
+      name,
+      status,
+      battery_level,
+      sensor_type,
+      notes,
+      zone_id,
+      custom_area_id,
+      com_port,
+      baud_rate,
+      camera_url,
+      camera_stream_url,
+      is_listening,
+    } = req.body;
 
     const data = {};
     if (name !== undefined) data.name = name.trim();
@@ -618,12 +652,19 @@ export const updateIotNode = async (req, res) => {
     if (sensor_type !== undefined) data.sensor_type = sensor_type;
     if (notes !== undefined) data.notes = notes ? notes.trim() : null;
     if (zone_id !== undefined) data.zone_id = zone_id ? parseInt(zone_id, 10) : null;
+    if (custom_area_id !== undefined) data.custom_area_id = custom_area_id ? parseInt(custom_area_id, 10) : null;
+    if (com_port !== undefined) data.com_port = com_port ? com_port.trim() : null;
+    if (baud_rate !== undefined) data.baud_rate = baud_rate ? parseInt(baud_rate, 10) : 115200;
+    if (camera_url !== undefined) data.camera_url = camera_url ? camera_url.trim() : null;
+    if (camera_stream_url !== undefined) data.camera_stream_url = camera_stream_url ? camera_stream_url.trim() : null;
+    if (is_listening !== undefined) data.is_listening = Boolean(is_listening);
 
     const updatedNode = await prisma.iotNode.update({
       where: { node_id: id },
       data,
       include: {
         zone: { select: { zone_id: true, name: true } },
+        custom_area: { select: { area_id: true, name: true, color: true } },
       },
     });
 
@@ -794,7 +835,20 @@ export const getNodeTriggers = async (req, res) => {
 export const createNodeTrigger = async (req, res) => {
   try {
     const nodeId = parseInt(req.params.id, 10);
-    const { trigger_type, severity, decibel_level, confidence, details, audio_sample_url, triggered_at } = req.body;
+    const {
+      trigger_type,
+      severity,
+      decibel_level,
+      confidence,
+      details,
+      audio_sample_url,
+      image_snapshot_url,
+      audio_ai_analysis,
+      vision_ai_analysis,
+      vision_score,
+      is_manual,
+      triggered_at,
+    } = req.body;
 
     const node = await prisma.iotNode.findUnique({ where: { node_id: nodeId } });
     if (!node) {
@@ -812,6 +866,11 @@ export const createNodeTrigger = async (req, res) => {
         confidence: confidence ? parseFloat(confidence) : 0.90,
         details: details ? details.trim() : null,
         audio_sample_url: audio_sample_url || null,
+        image_snapshot_url: image_snapshot_url || null,
+        audio_ai_analysis: audio_ai_analysis || null,
+        vision_ai_analysis: vision_ai_analysis || null,
+        vision_score: vision_score ? parseFloat(vision_score) : null,
+        is_manual: Boolean(is_manual),
         triggered_at: eventTime,
       },
     });

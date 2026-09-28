@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from config import HOST, PORT, DEBUG
 from database import init_db_pool, close_db_pool
 from routers.telemetry import router as telemetry_router
+from routers.nodes import router as nodes_router
 from routers.websocket_manager import manager
 
 # Configure logging
@@ -47,8 +48,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount Telemetry Router
+# Mount Telemetry & Nodes Routers
 app.include_router(telemetry_router)
+app.include_router(nodes_router)
 
 # WebSocket endpoint for real-time live telemetry streaming to web clients
 @app.websocket("/ws/telemetry")

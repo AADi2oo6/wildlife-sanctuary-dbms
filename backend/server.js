@@ -15,6 +15,7 @@ import healthRoutes from './routes/healthRoutes.js'
 import feedbackRoutes from './routes/feedbackRoutes.js'
 import contactRoutes from './routes/contactRoutes.js'
 import dashboardRoutes from './routes/dashboardRoutes.js'
+import telemetryRoutes from './routes/telemetryRoutes.js'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import prisma from './config/prisma.js'
@@ -100,6 +101,8 @@ app.use('/api/medical',   healthRoutes)
 app.use('/api/feedback',  feedbackRoutes)
 app.use('/api/contact',   contactRoutes)
 app.use('/api/dashboard', dashboardRoutes)
+app.use('/api/telemetry', telemetryRoutes)
+app.use('/api/iot/telemetry', telemetryRoutes)
 
 // ── 404 handler ───────────────────────────────────────────────────────────────
 app.use((req, res) => {

@@ -378,9 +378,9 @@ const IotMapTab = ({ toast }) => {
   }, []);
 
   // Load deployed nodes, zones & custom marked areas
-  const loadData = useCallback(async () => {
+  const loadData = useCallback(async (silent = false) => {
     try {
-      setLoading(true);
+      if (!silent) setLoading(true);
       const [nodesRes, zonesRes, areasRes] = await Promise.all([
         api.get("/admin/iot-nodes"),
         api.get("/zones"),
@@ -390,15 +390,95 @@ const IotMapTab = ({ toast }) => {
       setZones(zonesRes.data.zones || []);
       setCustomAreas(areasRes.data.areas || []);
     } catch (err) {
-      toast(err.response?.data?.error || "Failed to load telemetry & area data.", "error");
+      if (!silent) {
+        toast(err.response?.data?.error || "Failed to load telemetry & area data.", "error");
+      }
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, [toast]);
 
+  // Initial load and auto-refresh polling every 3.5s
   useEffect(() => {
-    loadData();
+    loadData(false);
+    const pollInterval = setInterval(() => {
+      loadData(true);
+    }, 3500);
+    return () => clearInterval(pollInterval);
   }, [loadData]);
+
+  // Real-time WebSocket Telemetry & Threat Ingestion listener
+  useEffect(() => {
+    let ws = null;
+    let reconnectTimeout = null;
+
+    const connectWs = () => {
+      try {
+        ws = new WebSocket("ws://localhost:8000/ws/telemetry");
+
+        ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (data.event === "telemetry_update") {
+              // Update node live in state
+              setNodes((prev) =>
+                prev.map((n) => {
+                  if (n.node_id === data.node_id || n.device_uid === data.device_uid) {
+                    return {
+                      ...n,
+                      status: data.node_status || n.status,
+                      battery_level: data.battery_level ?? n.battery_level,
+                      last_ping: data.timestamp,
+                      _count: {
+                        ...n._count,
+                        trigger_events: (n._count?.trigger_events || 0) + (data.is_anomaly ? 1 : 0),
+                      },
+                    };
+                  }
+                  return n;
+                })
+              );
+
+              // Update selected node if open
+              setSelectedNode((prev) => {
+                if (!prev || (prev.node_id !== data.node_id && prev.device_uid !== data.device_uid)) return prev;
+                return {
+                  ...prev,
+                  status: data.node_status || prev.status,
+                  battery_level: data.battery_level ?? prev.battery_level,
+                };
+              });
+
+              if (data.is_anomaly || data.severity === "ALERT") {
+                toast?.(
+                  `🚨 [THREAT DETECTED] ${data.node_name || 'Node'}: ${data.threat_type || 'Acoustic spike'} (${data.sound_level_db} dB)`,
+                  "error"
+                );
+              }
+            }
+          } catch (e) {
+            // ignore non-json packet
+          }
+        };
+
+        ws.onerror = () => {
+          ws?.close();
+        };
+
+        ws.onclose = () => {
+          reconnectTimeout = setTimeout(connectWs, 5000);
+        };
+      } catch (err) {
+        reconnectTimeout = setTimeout(connectWs, 5000);
+      }
+    };
+
+    connectWs();
+    return () => {
+      if (ws) ws.close();
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
+    };
+  }, [toast]);
 
   // Initialize Leaflet Map
   useEffect(() => {

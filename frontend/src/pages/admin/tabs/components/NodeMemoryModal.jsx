@@ -20,6 +20,7 @@ import {
   TrendingUp,
 } from "lucide-react";
 import { Badge } from "../../shared/adminComponents";
+import api from "../../../../api/axiosInstance";
 
 const SEVERITY_COLORS = {
   ALERT: "#ef4444",
@@ -107,34 +108,53 @@ export const NodeMemoryModal = ({ node, onClose, onTriggerLogged, toast }) => {
 
   const svgRef = useRef(null);
 
-  const fetchNodeMemory = async () => {
+  const notify = (msg, type = "info") => {
+    if (!toast) return;
+    if (type === "error" && typeof toast.error === "function") {
+      toast.error(msg);
+    } else if (type === "success" && typeof toast.success === "function") {
+      toast.success(msg);
+    } else if (typeof toast === "function") {
+      toast(msg, type);
+    }
+  };
+
+  const fetchNodeMemory = async (showLoading = true) => {
     if (!node?.node_id) return;
-    setLoading(true);
+    if (showLoading) setLoading(true);
     try {
-      const res = await fetch(`/api/admin/iot-nodes/${node.node_id}/triggers?timeframe=${timeframe}`, {
-        headers: { "Content-Type": "application/json" },
-      });
-      const data = await res.json();
+      const res = await api.get(`/admin/iot-nodes/${node.node_id}/triggers?timeframe=${timeframe}`);
+      const data = res.data;
       if (data.success) {
         setTriggers(data.triggers || []);
         setStats(data.stats || null);
         if (data.triggers?.length > 0) {
-          // Default select the latest trigger
-          setSelectedTrigger(data.triggers[data.triggers.length - 1]);
+          setSelectedTrigger((prev) => {
+            if (!prev) return data.triggers[data.triggers.length - 1];
+            const found = data.triggers.find((t) => t.event_id === prev.event_id);
+            return found || data.triggers[data.triggers.length - 1];
+          });
         }
       } else {
-        toast?.error?.(data.error || "Failed to load node memory.");
+        if (showLoading) notify(data.error || "Failed to load node memory.", "error");
       }
     } catch (err) {
       console.error("Error fetching node memory:", err);
-      toast?.error?.("Network error while reading node memory history.");
+      if (showLoading) {
+        notify(err.response?.data?.error || "Network error while reading node memory history.", "error");
+      }
     } finally {
-      setLoading(false);
+      if (showLoading) setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchNodeMemory();
+    fetchNodeMemory(true);
+    // Real-time polling so any mock_esp32 or edge alert automatically paints a dot live
+    const interval = setInterval(() => {
+      fetchNodeMemory(false);
+    }, 3000);
+    return () => clearInterval(interval);
   }, [node?.node_id, timeframe]);
 
   // Handle Preset selection in simulation
@@ -154,31 +174,27 @@ export const NodeMemoryModal = ({ node, onClose, onTriggerLogged, toast }) => {
     e.preventDefault();
     setSubmittingTrigger(true);
     try {
-      const res = await fetch(`/api/admin/iot-nodes/${node.node_id}/triggers`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          trigger_type: simForm.trigger_type,
-          severity: simForm.severity,
-          decibel_level: parseFloat(simForm.decibel_level),
-          confidence: parseFloat(simForm.confidence),
-          details: simForm.details,
-          triggered_at: new Date().toISOString(),
-        }),
+      const res = await api.post(`/admin/iot-nodes/${node.node_id}/triggers`, {
+        trigger_type: simForm.trigger_type,
+        severity: simForm.severity,
+        decibel_level: parseFloat(simForm.decibel_level),
+        confidence: parseFloat(simForm.confidence),
+        details: simForm.details,
+        triggered_at: new Date().toISOString(),
       });
 
-      const data = await res.json();
+      const data = res.data;
       if (data.success) {
-        toast?.success?.("New trigger logged into node memory!");
+        notify("New trigger logged into node memory!", "success");
         setShowSimulate(false);
-        await fetchNodeMemory();
+        await fetchNodeMemory(false);
         onTriggerLogged?.(node.node_id, data.trigger);
       } else {
-        toast?.error?.(data.error || "Failed to log trigger.");
+        notify(data.error || "Failed to log trigger.", "error");
       }
     } catch (err) {
       console.error("Error simulating trigger:", err);
-      toast?.error?.("Server error logging trigger.");
+      notify(err.response?.data?.error || "Server error logging trigger.", "error");
     } finally {
       setSubmittingTrigger(false);
     }

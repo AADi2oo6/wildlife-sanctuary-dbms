@@ -77,25 +77,25 @@ If using an **FTDI USB-to-TTL programmer**:
 ### Step 2: Flash Device 1 (Acoustic Sensor Node)
 1. Open [`device1_esp32_audio_sensor/device1_esp32_audio_sensor.ino`](device1_esp32_audio_sensor/device1_esp32_audio_sensor.ino) in Arduino IDE.
 2. Under **Tools**, select:
-   - **Board**: `ESP32 Dev Module`
-   - **Upload Speed**: `921600`
+   - **Board**: `ESP32 Dev Module` (or your specific ESP32 board)
+   - **Upload Speed**: `921600` (or `115200`)
    - **CPU Frequency**: `240MHz`
    - **Flash Frequency**: `80MHz`
-   - **Partition Scheme**: `Default 4MB with spiffs (1.2MB APP / 1.5MB SPIFFS)`
+   - **Partition Scheme**: Any partition scheme works! (Uses Zero-SPIFFS Real-Time DMA Streaming)
    - **Port**: Select the COM port of your ESP32 (e.g. `COM3` on Windows).
 3. Click the **Upload** button (Arrow icon).
 4. After upload completes, open **Serial Monitor** at **115200 baud**.
-5. You should see:
+5. You will see:
    ```text
    🌲 DEEPGREEN IoT - DEVICE 1: ACOUSTIC / SEISMIC SENSOR NODE
    Node UID:         DGN-NODE-67SF-608
-   Firmware Version: v2.0-wired
-   [INFO] SPIFFS storage initialized.
+   Firmware Version: v2.1-direct-stream
+   Streaming Mode:   Zero-SPIFFS Real-Time DMA Stream
    [STATUS] Boot / Reset complete. Listening for vibration strikes & Serial commands...
    ```
 6. **Quick Test**:
-   - Tap the vibration sensor: it triggers `[EVENT] Physical vibration strike detected`, records 5 seconds of audio, and streams the hex WAV.
-   - Or type `CMD:RECORD_5S` in the Serial Monitor input box and hit Enter: it records and transmits on demand!
+   - Tap the vibration sensor: it triggers `[EVENT] Physical vibration strike detected on GPIO 34!`, immediately streams the 44-byte WAV header and 5 seconds of 16kHz audio data without SPIFFS errors or flash delays!
+   - Or type `CMD:RECORD_5S` in the Serial Monitor input box and hit Enter: it records and streams on demand!
 
 ---
 

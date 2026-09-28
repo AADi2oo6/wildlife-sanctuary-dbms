@@ -15,11 +15,12 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import dotenv from 'dotenv';
 
-dotenv.config();
-
 const { Pool } = pg;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
+
+dotenv.config({ path: join(__dirname, '../.env') });
+dotenv.config();
 
 const sqlPath = join(__dirname, '../database/core_extension.sql');
 const sql     = readFileSync(sqlPath, 'utf8');

@@ -38,8 +38,8 @@ export const Badge = ({ label, color }) => (
 /* ── Modal wrapper ──────────────────────────────────── */
 export const Modal = ({ title, onClose, children }) => (
   <div
-    className="fixed inset-0 z-50 flex items-center justify-center p-4"
-    style={{ background: "rgba(0,0,0,0.75)", backdropFilter: "blur(6px)" }}
+    className="fixed inset-0 z-[2500] flex items-center justify-center p-4"
+    style={{ background: "rgba(0,0,0,0.80)", backdropFilter: "blur(8px)" }}
     onClick={e => e.target === e.currentTarget && onClose()}
   >
     <div className="relative w-full max-w-lg overflow-hidden"
@@ -123,13 +123,17 @@ export const DeleteButton = ({ onClick, disabled }) => (
 );
 
 /* ── Submit form button ─────────────────────────────── */
-export const SubmitButton = ({ submitting, label, loadingLabel }) => (
-  <button type="submit" disabled={submitting}
-    className="mt-1 w-full py-3 text-[11px] font-black uppercase tracking-[0.28em] text-black transition hover:brightness-110 disabled:opacity-50"
-    style={{ background: "#a3e635", borderRadius: "8px" }}>
-    {submitting ? loadingLabel : label}
-  </button>
-);
+export const SubmitButton = ({ submitting, label, loadingLabel, children, loading }) => {
+  const isSubmitting = submitting || loading;
+  const content = isSubmitting ? (loadingLabel || "Processing...") : (children || label || "Submit");
+  return (
+    <button type="submit" disabled={isSubmitting}
+      className="mt-1 w-full py-3 text-[11px] font-black uppercase tracking-[0.28em] text-black transition hover:brightness-110 disabled:opacity-50"
+      style={{ background: "#a3e635", borderRadius: "8px" }}>
+      {content}
+    </button>
+  );
+};
 
 /* ── Empty state ────────────────────────────────────── */
 export const EmptyState = ({ message }) => (

@@ -22,6 +22,15 @@ import {
   getAllContactMessages,
   markContactMessageRead,
   deleteContactMessage,
+  getAllIotNodes,
+  createIotNode,
+  updateIotNode,
+  deleteIotNode,
+  getAllCustomAreas,
+  createCustomArea,
+  deleteCustomArea,
+  getNodeTriggers,
+  createNodeTrigger,
 } from '../controllers/adminController.js';
 
 const router = Router();
@@ -71,6 +80,19 @@ router.delete('/feedback/:id',      deleteFeedback);
 router.get('/contact',              getAllContactMessages);
 router.patch('/contact/:id/read',   markContactMessageRead);
 router.delete('/contact/:id',       deleteContactMessage);
+
+// IoT Nodes & Memory
+router.get('/iot-nodes',                  getAllIotNodes);
+router.post('/iot-nodes',                 createIotNode);
+router.patch('/iot-nodes/:id',            updateIotNode);
+router.delete('/iot-nodes/:id',           deleteIotNode);
+router.get('/iot-nodes/:id/triggers',     getNodeTriggers);
+router.post('/iot-nodes/:id/triggers',    createNodeTrigger);
+
+// Custom Forest & Sanctuary Areas
+router.get('/custom-areas',         getAllCustomAreas);
+router.post('/custom-areas',        createCustomArea);
+router.delete('/custom-areas/:id',  deleteCustomArea);
 
 export default router;
 

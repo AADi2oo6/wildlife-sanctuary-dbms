@@ -15,6 +15,7 @@ model Zone {
   ticket_price       Decimal     @db.Decimal(10, 2)
   enclosures         Enclosure[]
   tickets            Ticket[]
+  iot_nodes          IotNode[]
 
   @@map("zones")
 }
@@ -169,3 +170,68 @@ enum Role {
   STAFF
   ADMIN
 }
+
+enum NodeStatus {
+  ACTIVE
+  ALERT
+  OFFLINE
+  MAINTENANCE
+}
+
+model IotNode {
+  node_id       Int         @id @default(autoincrement())
+  device_uid    String      @unique @db.VarChar(100)
+  name          String      @db.VarChar(150)
+  latitude      Decimal     @db.Decimal(9, 6)
+  longitude     Decimal     @db.Decimal(9, 6)
+  status        NodeStatus  @default(ACTIVE)
+  battery_level Int         @default(100)
+  sensor_type   String?     @default("ACOUSTIC_VISION") @db.VarChar(100)
+  notes         String?     @db.Text
+  last_ping     DateTime?   @default(now())
+  created_at    DateTime    @default(now())
+  updated_at    DateTime    @updatedAt
+  zone_id       Int?
+  zone          Zone?       @relation(fields: [zone_id], references: [zone_id], onDelete: SetNull)
+  custom_area_id Int?
+  custom_area    CustomArea? @relation(fields: [custom_area_id], references: [area_id], onDelete: SetNull)
+
+  trigger_events IotTriggerEvent[]
+
+  @@index([status])
+  @@map("iot_nodes")
+}
+
+model IotTriggerEvent {
+  event_id         Int      @id @default(autoincrement())
+  node_id          Int
+  node             IotNode  @relation(fields: [node_id], references: [node_id], onDelete: Cascade)
+  trigger_type     String   @db.VarChar(100)
+  severity         String   @default("ALERT") @db.VarChar(50)
+  decibel_level    Decimal? @db.Decimal(5, 2)
+  confidence       Decimal? @db.Decimal(4, 3)
+  details          String?  @db.Text
+  audio_sample_url String?  @db.VarChar(255)
+  triggered_at     DateTime @default(now())
+  created_at       DateTime @default(now())
+
+  @@index([node_id, triggered_at])
+  @@map("iot_trigger_events")
+}
+
+model CustomArea {
+  area_id     Int       @id @default(autoincrement())
+  name        String    @db.VarChar(150)
+  area_type   String    @default("FOREST") @db.VarChar(100)
+  coordinates Json
+  area_sq_km  Decimal   @db.Decimal(12, 2)
+  color       String    @default("#22c55e") @db.VarChar(30)
+  climate     String?   @db.VarChar(100)
+  description String?   @db.Text
+  created_at  DateTime  @default(now())
+  updated_at  DateTime  @updatedAt
+  iot_nodes   IotNode[]
+
+  @@map("custom_areas")
+}
+

@@ -16,9 +16,11 @@ import HealthLogsTab  from "./tabs/HealthLogsTab";
 import SurveysTab     from "./tabs/SurveysTab";
 import FeedbackTab    from "./tabs/FeedbackTab";
 import TicketsTab     from "./tabs/TicketsTab";
+import IotMapTab      from "./tabs/IotMapTab";
 
 const TAB_COMPONENTS = {
   overview:    OverviewTab,
+  "iot-map":   IotMapTab,
   visitors:    VisitorsTab,
   staff:       StaffTab,
   animals:     AnimalsTab,

@@ -538,3 +538,305 @@ export const deleteContactMessage = async (req, res) => {
     return res.status(500).json({ success: false, error: 'Failed to delete message.' });
   }
 };
+
+/** GET /api/admin/iot-nodes — list all deployed IoT nodes */
+export const getAllIotNodes = async (req, res) => {
+  try {
+    const nodes = await prisma.iotNode.findMany({
+      include: {
+        zone: { select: { zone_id: true, name: true } },
+        custom_area: { select: { area_id: true, name: true, color: true } },
+        _count: { select: { trigger_events: true } },
+      },
+      orderBy: { created_at: 'desc' },
+    });
+    return res.status(200).json({ success: true, nodes });
+  } catch (error) {
+    console.error('🔥 Admin – Fetch IoT Nodes Error:', error);
+    return res.status(500).json({ success: false, error: 'Failed to fetch IoT nodes.' });
+  }
+};
+
+/** POST /api/admin/iot-nodes — deploy a new IoT node */
+export const createIotNode = async (req, res) => {
+  try {
+    const { name, device_uid, latitude, longitude, status, battery_level, sensor_type, notes, zone_id, custom_area_id } = req.body;
+
+    if (!name || latitude === undefined || longitude === undefined) {
+      return res.status(400).json({ success: false, error: 'Node name, latitude, and longitude are required.' });
+    }
+
+    const lat = parseFloat(latitude);
+    const lng = parseFloat(longitude);
+    if (isNaN(lat) || isNaN(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+      return res.status(400).json({ success: false, error: 'Valid geographic coordinates are required.' });
+    }
+
+    const uid = device_uid && device_uid.trim()
+      ? device_uid.trim()
+      : `DGN-${Date.now().toString(36).toUpperCase()}-${Math.floor(1000 + Math.random() * 9000)}`;
+
+    const node = await prisma.iotNode.create({
+      data: {
+        name: name.trim(),
+        device_uid: uid,
+        latitude: lat,
+        longitude: lng,
+        status: status || 'ACTIVE',
+        battery_level: battery_level !== undefined ? parseInt(battery_level, 10) : 100,
+        sensor_type: sensor_type || 'ACOUSTIC_VISION',
+        notes: notes ? notes.trim() : null,
+        zone_id: zone_id ? parseInt(zone_id, 10) : null,
+        custom_area_id: custom_area_id ? parseInt(custom_area_id, 10) : null,
+      },
+      include: {
+        zone: { select: { zone_id: true, name: true } },
+        custom_area: { select: { area_id: true, name: true, color: true } },
+      },
+    });
+
+    return res.status(201).json({ success: true, message: 'IoT node deployed successfully.', node });
+  } catch (error) {
+    console.error('🔥 Admin – Deploy IoT Node Error:', error);
+    if (error.code === 'P2002') {
+      return res.status(409).json({ success: false, error: 'An IoT node with this Device UID already exists.' });
+    }
+    return res.status(500).json({ success: false, error: 'Failed to deploy IoT node.' });
+  }
+};
+
+/** PATCH /api/admin/iot-nodes/:id — update an IoT node */
+export const updateIotNode = async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const { name, status, battery_level, sensor_type, notes, zone_id } = req.body;
+
+    const data = {};
+    if (name !== undefined) data.name = name.trim();
+    if (status !== undefined) data.status = status;
+    if (battery_level !== undefined) data.battery_level = parseInt(battery_level, 10);
+    if (sensor_type !== undefined) data.sensor_type = sensor_type;
+    if (notes !== undefined) data.notes = notes ? notes.trim() : null;
+    if (zone_id !== undefined) data.zone_id = zone_id ? parseInt(zone_id, 10) : null;
+
+    const updatedNode = await prisma.iotNode.update({
+      where: { node_id: id },
+      data,
+      include: {
+        zone: { select: { zone_id: true, name: true } },
+      },
+    });
+
+    return res.status(200).json({ success: true, message: 'IoT node updated successfully.', node: updatedNode });
+  } catch (error) {
+    console.error('🔥 Admin – Update IoT Node Error:', error);
+    if (error.code === 'P2025') return res.status(404).json({ success: false, error: 'IoT node not found.' });
+    return res.status(500).json({ success: false, error: 'Failed to update IoT node.' });
+  }
+};
+
+/** DELETE /api/admin/iot-nodes/:id — decommission / delete an IoT node */
+export const deleteIotNode = async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    await prisma.iotNode.delete({ where: { node_id: id } });
+    return res.status(200).json({ success: true, message: 'IoT node decommissioned successfully.' });
+  } catch (error) {
+    console.error('🔥 Admin – Delete IoT Node Error:', error);
+    if (error.code === 'P2025') return res.status(404).json({ success: false, error: 'IoT node not found.' });
+    return res.status(500).json({ success: false, error: 'Failed to delete IoT node.' });
+  }
+};
+
+/** GET /api/admin/custom-areas — list all custom marked areas */
+export const getAllCustomAreas = async (req, res) => {
+  try {
+    const areas = await prisma.customArea.findMany({
+      include: {
+        iot_nodes: {
+          select: { node_id: true, name: true, status: true, battery_level: true, latitude: true, longitude: true },
+        },
+      },
+      orderBy: { created_at: 'desc' },
+    });
+    return res.status(200).json({ success: true, areas });
+  } catch (error) {
+    console.error('🔥 Admin – Fetch Custom Areas Error:', error);
+    return res.status(500).json({ success: false, error: 'Failed to fetch custom areas.' });
+  }
+};
+
+/** POST /api/admin/custom-areas — save a new custom marked area */
+export const createCustomArea = async (req, res) => {
+  try {
+    const { name, area_type, coordinates, area_sq_km, color, climate, description } = req.body;
+
+    if (!name || !coordinates || !Array.isArray(coordinates) || coordinates.length < 3) {
+      return res.status(400).json({ success: false, error: 'Area name and at least 3 perimeter coordinates are required.' });
+    }
+
+    const area = await prisma.customArea.create({
+      data: {
+        name: name.trim(),
+        area_type: area_type || 'FOREST',
+        coordinates,
+        area_sq_km: parseFloat(area_sq_km) || 0,
+        color: color || '#22c55e',
+        climate: climate ? climate.trim() : null,
+        description: description ? description.trim() : null,
+      },
+      include: {
+        iot_nodes: true,
+      },
+    });
+
+    return res.status(201).json({ success: true, message: 'Custom area saved successfully.', area });
+  } catch (error) {
+    console.error('🔥 Admin – Create Custom Area Error:', error);
+    return res.status(500).json({ success: false, error: 'Failed to save custom area.' });
+  }
+};
+
+/** DELETE /api/admin/custom-areas/:id — delete a custom area */
+export const deleteCustomArea = async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    await prisma.customArea.delete({ where: { area_id: id } });
+    return res.status(200).json({ success: true, message: 'Custom area removed successfully.' });
+  } catch (error) {
+    console.error('🔥 Admin – Delete Custom Area Error:', error);
+    if (error.code === 'P2025') return res.status(404).json({ success: false, error: 'Custom area not found.' });
+    return res.status(500).json({ success: false, error: 'Failed to delete custom area.' });
+  }
+};
+
+/** GET /api/admin/iot-nodes/:id/triggers — retrieve memory/trigger history for a specific node */
+export const getNodeTriggers = async (req, res) => {
+  try {
+    const nodeId = parseInt(req.params.id, 10);
+    const { timeframe } = req.query; // '24h', '7d', '30d', 'all'
+
+    const node = await prisma.iotNode.findUnique({
+      where: { node_id: nodeId },
+      include: {
+        zone: { select: { zone_id: true, name: true } },
+        custom_area: { select: { area_id: true, name: true, color: true } },
+      },
+    });
+
+    if (!node) {
+      return res.status(404).json({ success: false, error: 'IoT node not found.' });
+    }
+
+    let dateFilter = undefined;
+    const now = new Date();
+    if (timeframe === '24h') {
+      dateFilter = { gte: new Date(now.getTime() - 24 * 60 * 60 * 1000) };
+    } else if (timeframe === '7d') {
+      dateFilter = { gte: new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000) };
+    } else if (timeframe === '30d') {
+      dateFilter = { gte: new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000) };
+    }
+
+    const whereClause = {
+      node_id: nodeId,
+      ...(dateFilter ? { triggered_at: dateFilter } : {}),
+    };
+
+    const triggers = await prisma.iotTriggerEvent.findMany({
+      where: whereClause,
+      orderBy: { triggered_at: 'asc' }, // chronological for time-series graph
+    });
+
+    // Compute summary stats
+    const total = triggers.length;
+    const alertCount = triggers.filter((t) => t.severity === 'ALERT').length;
+    const warningCount = triggers.filter((t) => t.severity === 'WARNING').length;
+    const infoCount = triggers.filter((t) => t.severity === 'INFO').length;
+
+    let maxDecibel = 0;
+    let sumConfidence = 0;
+    let confidenceCount = 0;
+
+    triggers.forEach((t) => {
+      const db = t.decibel_level ? parseFloat(t.decibel_level) : 0;
+      if (db > maxDecibel) maxDecibel = db;
+      if (t.confidence) {
+        sumConfidence += parseFloat(t.confidence);
+        confidenceCount++;
+      }
+    });
+
+    const avgConfidence = confidenceCount > 0 ? parseFloat((sumConfidence / confidenceCount).toFixed(3)) : null;
+    const lastTrigger = triggers.length > 0 ? triggers[triggers.length - 1].triggered_at : null;
+
+    return res.status(200).json({
+      success: true,
+      node,
+      triggers,
+      stats: {
+        total,
+        alertCount,
+        warningCount,
+        infoCount,
+        maxDecibel,
+        avgConfidence,
+        lastTrigger,
+      },
+    });
+  } catch (error) {
+    console.error('🔥 Admin – Fetch Node Triggers Error:', error);
+    return res.status(500).json({ success: false, error: 'Failed to fetch node trigger history.' });
+  }
+};
+
+/** POST /api/admin/iot-nodes/:id/triggers — log / simulate a new trigger event in node memory */
+export const createNodeTrigger = async (req, res) => {
+  try {
+    const nodeId = parseInt(req.params.id, 10);
+    const { trigger_type, severity, decibel_level, confidence, details, audio_sample_url, triggered_at } = req.body;
+
+    const node = await prisma.iotNode.findUnique({ where: { node_id: nodeId } });
+    if (!node) {
+      return res.status(404).json({ success: false, error: 'IoT node not found.' });
+    }
+
+    const eventTime = triggered_at ? new Date(triggered_at) : new Date();
+
+    const trigger = await prisma.iotTriggerEvent.create({
+      data: {
+        node_id: nodeId,
+        trigger_type: trigger_type || 'ACOUSTIC_DISTURBANCE',
+        severity: severity || 'ALERT',
+        decibel_level: decibel_level ? parseFloat(decibel_level) : null,
+        confidence: confidence ? parseFloat(confidence) : 0.90,
+        details: details ? details.trim() : null,
+        audio_sample_url: audio_sample_url || null,
+        triggered_at: eventTime,
+      },
+    });
+
+    // If it's an ALERT, also update the node's status to ALERT
+    const updateData = { last_ping: eventTime };
+    if (severity === 'ALERT') {
+      updateData.status = 'ALERT';
+    }
+
+    await prisma.iotNode.update({
+      where: { node_id: nodeId },
+      data: updateData,
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: 'Trigger logged to node memory.',
+      trigger,
+    });
+  } catch (error) {
+    console.error('🔥 Admin – Create Node Trigger Error:', error);
+    return res.status(500).json({ success: false, error: 'Failed to record trigger event.' });
+  }
+};
+
+
+

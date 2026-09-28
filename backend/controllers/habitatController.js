@@ -1,5 +1,6 @@
 import prisma from '../config/prisma.js';
-import { Prisma } from '@prisma/client';
+import pkg from '@prisma/client';
+const { Prisma } = pkg;
 
 export const createEnclosure = async (req, res) => {
   try {

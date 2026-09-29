@@ -1,6 +1,7 @@
 import logging
 import asyncio
 import json
+import time
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
@@ -14,18 +15,24 @@ from services.serial_manager import serial_bridge
 from services.camera_client import CameraClient
 from services.ai_audio_agent import audio_ai_agent
 from services.ai_vision_agent import vision_ai_agent
+from services.telegram_bot import telegram_bot
 
 logger = logging.getLogger("fastapi_iot.event_pipeline")
+
+# Rate limiters & deduplication guards per node (prevents database overload from false vibrations)
+_last_node_trigger_time: Dict[int, float] = {}
+_last_node_info_insert_time: Dict[int, float] = {}
 
 async def process_incoming_audio_event(payload: Dict[str, Any]):
     """
     Core Multi-Tier Multi-Modal Autonomous Processing Pipeline:
     1. Tier 1 (Seismic/Vibration): Audio WAV streamed from Device 1 is received.
-    2. Tier 2 (Acoustic AI Agent): Evaluates audio with Whisper + GPT-4o-mini.
-    3. Escalation Gate: If threat confidence >= 80%, triggers Device 2 (ESP32-CAM) snapshot.
-    4. Tier 3 (Vision AI Agent): Inspects optical snapshot with GPT-4o-mini Vision.
-    5. Persistence: Inserts compound multi-modal record into Supabase.
-    6. Broadcast: Pushes real-time alert with audio/visual forensic data to Web Dashboard.
+    2. Rate-Limiting: Throttles back-to-back false vibration triggers to prevent DB overload.
+    3. Tier 2 (Acoustic AI Agent): Evaluates audio with Fast-Path / Whisper + GPT-4o-mini.
+    4. Escalation Gate: If threat confidence >= 80%, triggers Device 2 (ESP32-CAM) snapshot.
+    5. Tier 3 (Vision AI Agent): Inspects optical snapshot with GPT-4o-mini Vision.
+    6. Persistence: Inserts compound multi-modal record into Supabase (throttling redundant baseline INFO).
+    7. Broadcast: Pushes real-time alert to Web Dashboard and Telegram Chatbot (@DeepGreen_TheBot).
     """
     node_id = payload.get("node_id")
     device_uid = payload.get("device_uid")
@@ -33,6 +40,19 @@ async def process_incoming_audio_event(payload: Dict[str, Any]):
     audio_file_path = payload.get("audio_file_path") or payload.get("file_path")
     trigger_source = payload.get("trigger_source", "VIBRATION_INTERRUPT")
     is_manual = (trigger_source == "OPERATOR_MANUAL_COMMAND")
+
+    now = time.time()
+    last_time = _last_node_trigger_time.get(node_id, 0.0)
+
+    # Cooldown Gate: If not manual and arrived within 8s of previous trigger, throttle burst
+    if not is_manual and (now - last_time < 8.0):
+        logger.warning(
+            f"⏳ [Pipeline] Throttling rapid vibration burst on Node #{node_id} "
+            f"({now - last_time:.1f}s since last). Dropping duplicate to protect database."
+        )
+        return
+
+    _last_node_trigger_time[node_id] = now
 
     logger.info(
         f"\n========================================================"
@@ -116,25 +136,37 @@ async def process_incoming_audio_event(payload: Dict[str, Any]):
 
     combined_details = " | ".join(details_parts)
 
-    # ── PERSIST IN SUPABASE ────────────────────────────────────────────────
+    # ── PERSIST IN SUPABASE (WITH FALSE-POSITIVE DB OVERLOAD PROTECTION) ──
     audio_ai_json = json.dumps(audio_diag) if audio_diag else None
     vision_ai_json = json.dumps(vision_diag) if vision_diag else None
 
-    created_event = await insert_trigger_event(
-        node_id=node_id,
-        trigger_type=primary_threat_type,
-        severity=severity,
-        decibel_level=measured_db,
-        confidence=acoustic_conf / 100.0,
-        details=combined_details,
-        audio_sample_url=audio_sample_url,
-        image_snapshot_url=image_snapshot_url,
-        audio_ai_analysis=audio_ai_json,
-        vision_ai_analysis=vision_ai_json,
-        vision_score=vision_score,
-        is_manual=is_manual
-    )
-    event_id = created_event.get("event_id")
+    # Overload Protection: If baseline normal ambient and not manual, throttle DB writes to max 1 per 60s
+    should_insert_db = True
+    if severity == "INFO" and not is_manual:
+        last_info = _last_node_info_insert_time.get(node_id, 0.0)
+        if now - last_info < 60.0:
+            should_insert_db = False
+            logger.info(f"🛡️ [Pipeline] Baseline ambient event skipped from DB persistence (throttled to 1/min).")
+        else:
+            _last_node_info_insert_time[node_id] = now
+
+    event_id = None
+    if should_insert_db:
+        created_event = await insert_trigger_event(
+            node_id=node_id,
+            trigger_type=primary_threat_type,
+            severity=severity,
+            decibel_level=measured_db,
+            confidence=acoustic_conf / 100.0,
+            details=combined_details,
+            audio_sample_url=audio_sample_url,
+            image_snapshot_url=image_snapshot_url,
+            audio_ai_analysis=audio_ai_json,
+            vision_ai_analysis=vision_ai_json,
+            vision_score=vision_score,
+            is_manual=is_manual
+        )
+        event_id = created_event.get("event_id")
 
     # Update Node status if Alert
     new_node_status = "ALERT" if severity == "ALERT" else node.get("status", "ACTIVE")
@@ -164,8 +196,26 @@ async def process_incoming_audio_event(payload: Dict[str, Any]):
     }
     await manager.broadcast(broadcast_data)
 
+    # ── TELEGRAM CHATBOT INSTANT THREAT NOTIFICATION ───────────────────────
+    # Broadcast alert directly to @DeepGreen_TheBot with audio AI analysis and camera snapshot
+    if severity in ("ALERT", "WARNING") or is_manual:
+        asyncio.create_task(
+            telegram_bot.broadcast_threat_alert(
+                node_name=node_name,
+                device_uid=device_uid,
+                primary_threat=primary_threat_type,
+                severity=severity,
+                decibel_level=measured_db,
+                confidence=acoustic_conf / 100.0,
+                details=combined_details,
+                audio_path=audio_file_path,
+                image_path=snapshot_result.get("file_path") if snapshot_result else None,
+                vision_reasoning=vision_diag.get("reasoning") if vision_diag else None
+            )
+        )
+
     logger.info(
-        f"🚀 [Pipeline Finished] Event #{event_id} stored & broadcasted! "
+        f"🚀 [Pipeline Finished] Event {'#' + str(event_id) if event_id else '(throttled)'} processed! "
         f"Severity={severity} | PrimaryThreat={primary_threat_type}"
     )
 

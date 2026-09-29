@@ -6,7 +6,7 @@ import {
   Layers, Globe, Shield, RefreshCw, X, AlertTriangle, CheckCircle, Crosshair,
   Navigation, LocateFixed, PenTool, Shapes, Undo2, Check, Info, Compass,
   History, Eye, Clock, AlertCircle, ChevronRight, Filter, Activity,
-  Camera, Video, Mic, Sun, Usb, Cable, Power, Play, Settings, Terminal, Cpu
+  Camera, Video, Mic, Sun, Usb, Cable, Power, Play, Settings, Terminal, Cpu, Send
 } from "lucide-react";
 import api from "../../../api/axiosInstance";
 import { Eyebrow, Badge, Modal, Inp, Sel, inputStyle, SubmitButton } from "../shared/adminComponents";
@@ -21,6 +21,7 @@ import {
   triggerManualSnapshot,
   fetchNodeLogs,
   updateNodeHardwareConfig,
+  triggerTelegramTestAlert,
 } from "../../../api/hardwareApi";
 
 // Fix Leaflet's default icon paths in bundled environments
@@ -1518,6 +1519,19 @@ const IotMapTab = ({ toast }) => {
           >
             <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
           </button>
+
+          {/* Telegram Security Bot Link */}
+          <a
+            href="https://t.me/DeepGreen_TheBot"
+            target="_blank"
+            rel="noopener noreferrer"
+            title="Open Telegram Security Chatbot @DeepGreen_TheBot"
+            className="flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-bold transition hover:bg-sky-500/25 cursor-pointer shadow-sm"
+            style={{ background: "rgba(14,165,233,0.15)", border: "1px solid rgba(14,165,233,0.3)", color: "#38bdf8" }}
+          >
+            <Send size={13} className="text-sky-400" />
+            <span>@DeepGreen_TheBot</span>
+          </a>
         </div>
       </div>
 

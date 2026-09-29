@@ -104,4 +104,13 @@ export const updateNodeHardwareConfig = async (nodeId, configData) => {
   return res.data;
 };
 
+/**
+ * Dispatch test threat alert to registered Telegram subscribers.
+ */
+export const triggerTelegramTestAlert = async () => {
+  const res = await fastApiClient.post("/api/hardware/telegram/test-alert");
+  return res.data;
+};
+
 export default fastApiClient;
+

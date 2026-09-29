@@ -44,11 +44,23 @@ async def lifespan(app: FastAPI):
         except Exception as conn_err:
             logger.warning(f"Could not auto-resume serial listeners: {conn_err}")
 
+        # Start autonomous Telegram alert bot service (@DeepGreen_TheBot)
+        try:
+            from services.telegram_bot import telegram_bot
+            await telegram_bot.start()
+        except Exception as bot_err:
+            logger.warning(f"Could not initialize Telegram Bot service: {bot_err}")
+
     except Exception as e:
         logger.error(f"⚠️ Database initialization failed on startup: {e}")
     yield
-    # Shutdown: cleanly close pool
+    # Shutdown: cleanly close pool and stop background bot
     logger.info("Shutting down IoT Ingestion Service...")
+    try:
+        from services.telegram_bot import telegram_bot
+        await telegram_bot.stop()
+    except Exception:
+        pass
     await close_db_pool()
 
 app = FastAPI(

@@ -48,13 +48,18 @@ const bool ENABLE_DEEP_SLEEP = false;
 // Buffer for serial incoming commands
 String inputCommandBuffer = "";
 
-// --- Vibration Sensor State & Hardware Interrupt ---
+// --- Vibration Sensor State & Hardware Interrupt Configuration ---
 volatile bool g_vibrationDetected = false;
 volatile unsigned long g_lastVibeInterruptMs = 0;
+const unsigned long VIBRATION_DEBOUNCE_MS = 250;      // 250ms debounce (filters mechanical bounce & float)
+const unsigned long POST_TRIGGER_COOLDOWN_MS = 12000; // 12-second lockout post-recording to prevent false re-triggers
+
+unsigned long g_cooldownUntilMs = 0;
 
 void IRAM_ATTR onVibrationInterrupt() {
   unsigned long now = millis();
-  if (now - g_lastVibeInterruptMs > 50) {
+  // Filter out any triggers during the post-trigger cooldown window or within debounce
+  if (now >= g_cooldownUntilMs && (now - g_lastVibeInterruptMs > VIBRATION_DEBOUNCE_MS)) {
     g_vibrationDetected = true;
     g_lastVibeInterruptMs = now;
   }
@@ -212,10 +217,10 @@ void setup() {
   Serial.println("========================================================");
 
   pinMode(VIBRATION_PIN, INPUT);
-  attachInterrupt(digitalPinToInterrupt(VIBRATION_PIN), onVibrationInterrupt, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(VIBRATION_PIN), onVibrationInterrupt, FALLING);
   Serial.print("[HARDWARE] Hardware interrupt attached to GPIO ");
   Serial.print(VIBRATION_PIN);
-  Serial.println(" on CHANGE (detects both strike impulse & settling)");
+  Serial.println(" on FALLING edge with 250ms debounce & 12s cooldown guard");
 
   // Check Wakeup Cause
   esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
@@ -237,14 +242,34 @@ void setup() {
 }
 
 void loop() {
-  // 1. Process hardware interrupt flag
+  unsigned long now = millis();
+
+  // 1. Process hardware interrupt flag with post-recording lockout protection
   if (g_vibrationDetected) {
     g_vibrationDetected = false;
-    Serial.println("\n========================================================");
-    Serial.println("💥 [EVENT] PHYSICAL VIBRATION STRIKE DETECTED ON GPIO 34!");
-    Serial.println("⚡ [TRIGGER] Vibration interrupt fired! Starting 5-second acoustic acquisition...");
-    Serial.println("========================================================");
-    recordAndTransmitAudio("VIBRATION_ACTIVE_INTERRUPT");
+
+    if (now >= g_cooldownUntilMs) {
+      // Detach interrupt during 5-second acquisition so continuous vibration doesn't queue duplicate recordings
+      detachInterrupt(digitalPinToInterrupt(VIBRATION_PIN));
+
+      Serial.println("\n========================================================");
+      Serial.println("💥 [EVENT] GENUINE PHYSICAL VIBRATION STRIKE DETECTED ON GPIO 34!");
+      Serial.println("⚡ [TRIGGER] Vibration interrupt fired! Starting 5-second acoustic acquisition...");
+      Serial.println("========================================================");
+
+      recordAndTransmitAudio("VIBRATION_ACTIVE_INTERRUPT");
+
+      // Arm 12-second cooldown to let all residual mechanical oscillations settle
+      g_cooldownUntilMs = millis() + POST_TRIGGER_COOLDOWN_MS;
+      g_vibrationDetected = false; // Purge residual bounces
+
+      Serial.print("[COOLDOWN] Sensor armed with 12s lockout to prevent false re-triggers until +");
+      Serial.print(POST_TRIGGER_COOLDOWN_MS / 1000);
+      Serial.println("s.");
+
+      // Re-attach hardware interrupt on FALLING edge
+      attachInterrupt(digitalPinToInterrupt(VIBRATION_PIN), onVibrationInterrupt, FALLING);
+    }
   }
 
   // 2. Track raw pin state transitions for diagnostic visibility

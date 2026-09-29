@@ -62,6 +62,20 @@ class AudioAIAgent:
         """
         calculated_db = calculate_wav_rms_db(wav_file_path)
 
+        # Fast-Path Filter: If sound pressure is low ambient (< 54 dB SPL), it cannot be a gunshot, chainsaw,
+        # or heavy vehicle. Return immediately in < 1ms to prevent OpenAI latency & DB flooding.
+        if calculated_db < 54.0 and trigger_source != "OPERATOR_MANUAL_COMMAND":
+            logger.info(f"🌿 [AudioAIAgent] Low acoustic energy ({calculated_db} dB SPL). Fast-path classified as NORMAL_AMBIENT.")
+            return {
+                "threat_detected": False,
+                "threat_type": "NORMAL_AMBIENT",
+                "confidence_score": 96.0,
+                "severity": "INFO",
+                "reasoning": f"Acoustic sound pressure ({calculated_db} dB SPL) is below disturbance threshold. Baseline ambient forest acoustics.",
+                "escalate_camera": False,
+                "decibel_level": calculated_db
+            }
+
         if not self.client:
             logger.warning("[AudioAIAgent] OpenAI API key not configured. Using heuristic analysis.")
             return self._heuristic_fallback(calculated_db, trigger_source)

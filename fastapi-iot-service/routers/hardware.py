@@ -306,6 +306,25 @@ async def trigger_manual_camera_snapshot(node_id: int):
     }
     await manager.broadcast(broadcast_data)
 
+    # Broadcast to Telegram subscribers
+    try:
+        from services.telegram_bot import telegram_bot
+        asyncio.create_task(
+            telegram_bot.broadcast_threat_alert(
+                node_name=node.get("name", f"Node #{node_id}"),
+                device_uid=node.get("device_uid", "DGN-NODE-67SF-608"),
+                primary_threat=f"OPTICAL_{vision_diag.get('threat_type', 'SNAPSHOT')}",
+                severity=severity,
+                decibel_level=42.0,
+                confidence=vision_score if vision_score else 0.90,
+                details=f"Camera Snapshot captured. {vision_diag.get('reasoning', '')}",
+                image_path=snapshot_path,
+                vision_reasoning=vision_diag.get("reasoning")
+            )
+        )
+    except Exception as tg_err:
+        logger.warning(f"Telegram dispatch note: {tg_err}")
+
     logger.info(f"✅ [ManualSnapshot] Created Event #{event_id} and broadcasted successfully.")
 
     return {
@@ -336,3 +355,33 @@ async def toggle_camera_flashlight(node_id: int, payload: FlashToggleRequest):
         "flash": payload.enable,
         "message": f"Flashlight {'activated' if payload.enable else 'deactivated'} on camera."
     }
+
+@router.post("/telegram/test-alert")
+async def trigger_telegram_test_alert():
+    """
+    Send a test threat alert to all registered Telegram subscribers of @DeepGreen_TheBot.
+    """
+    from services.telegram_bot import telegram_bot
+    if not telegram_bot.subscribers:
+        return {
+            "status": "warning",
+            "message": "No subscribers registered yet. Please open https://t.me/DeepGreen_TheBot and send /start first!",
+            "subscribers_count": 0
+        }
+
+    await telegram_bot.broadcast_threat_alert(
+        node_name="Collage Garden Sensor 01",
+        device_uid="DGN-NODE-67SF-608",
+        primary_threat="CHAINSAW_INTRUSION",
+        severity="ALERT",
+        decibel_level=86.4,
+        confidence=0.92,
+        details="Acoustic analysis classified two-stroke internal combustion engine signature consistent with illegal timber logging.",
+        vision_reasoning="Optical frame analyzed: Perimeter breach confirmed in restricted zone."
+    )
+    return {
+        "status": "success",
+        "message": f"Test alert dispatched to {len(telegram_bot.subscribers)} Telegram subscribers.",
+        "subscribers_count": len(telegram_bot.subscribers)
+    }
+

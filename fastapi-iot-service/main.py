@@ -7,8 +7,12 @@ from fastapi.responses import JSONResponse
 
 from config import HOST, PORT, DEBUG
 from database import init_db_pool, close_db_pool
+from pathlib import Path
+from fastapi.staticfiles import StaticFiles
 from routers.telemetry import router as telemetry_router
 from routers.nodes import router as nodes_router
+from routers.hardware import router as hardware_router
+from services.event_pipeline import init_event_pipeline
 from routers.websocket_manager import manager
 
 # Configure logging
@@ -20,10 +24,11 @@ logger = logging.getLogger("fastapi_iot.main")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: initialize database connection pool
+    # Startup: initialize database connection pool & hardware event pipeline
     logger.info("🌲 DeepGreen IoT Ingestion & Telemetry Service starting up...")
     try:
         await init_db_pool()
+        init_event_pipeline()
         logger.info("📡 Ready to ingest IoT device telemetry and acoustic threat packets.")
     except Exception as e:
         logger.error(f"⚠️ Database initialization failed on startup: {e}")
@@ -48,9 +53,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount Telemetry & Nodes Routers
+# Mount Static Uploads (audio & images)
+uploads_dir = Path(__file__).resolve().parent / "uploads"
+uploads_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=str(uploads_dir)), name="uploads")
+
+# Mount Telemetry, Nodes & Hardware Routers
 app.include_router(telemetry_router)
 app.include_router(nodes_router)
+app.include_router(hardware_router)
 
 # WebSocket endpoint for real-time live telemetry streaming to web clients
 @app.websocket("/ws/telemetry")

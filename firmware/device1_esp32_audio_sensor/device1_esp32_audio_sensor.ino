@@ -48,6 +48,18 @@ const bool ENABLE_DEEP_SLEEP = false;
 // Buffer for serial incoming commands
 String inputCommandBuffer = "";
 
+// --- Vibration Sensor State & Hardware Interrupt ---
+volatile bool g_vibrationDetected = false;
+volatile unsigned long g_lastVibeInterruptMs = 0;
+
+void IRAM_ATTR onVibrationInterrupt() {
+  unsigned long now = millis();
+  if (now - g_lastVibeInterruptMs > 50) {
+    g_vibrationDetected = true;
+    g_lastVibeInterruptMs = now;
+  }
+}
+
 void getWavHeader(byte* header, uint32_t dataSize) {
   uint32_t fileSize = dataSize + WAV_HEADER_SIZE - 8;
   uint32_t byteRate = SAMPLE_RATE * 2; // 16-bit mono = 2 bytes per sample
@@ -200,6 +212,10 @@ void setup() {
   Serial.println("========================================================");
 
   pinMode(VIBRATION_PIN, INPUT);
+  attachInterrupt(digitalPinToInterrupt(VIBRATION_PIN), onVibrationInterrupt, CHANGE);
+  Serial.print("[HARDWARE] Hardware interrupt attached to GPIO ");
+  Serial.print(VIBRATION_PIN);
+  Serial.println(" on CHANGE (detects both strike impulse & settling)");
 
   // Check Wakeup Cause
   esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
@@ -221,17 +237,33 @@ void setup() {
 }
 
 void loop() {
-  // Check if vibration pin went HIGH in active loop (wired mode)
-  static int lastVibeState = LOW;
-  int currentVibeState = digitalRead(VIBRATION_PIN);
-  if (currentVibeState == HIGH && lastVibeState == LOW) {
-    delay(40); // Debounce
-    if (digitalRead(VIBRATION_PIN) == HIGH) {
-      Serial.println("\n[EVENT] Physical vibration strike detected on GPIO 34!");
-      recordAndTransmitAudio("VIBRATION_ACTIVE_INTERRUPT");
-    }
+  // 1. Process hardware interrupt flag
+  if (g_vibrationDetected) {
+    g_vibrationDetected = false;
+    Serial.println("\n========================================================");
+    Serial.println("💥 [EVENT] PHYSICAL VIBRATION STRIKE DETECTED ON GPIO 34!");
+    Serial.println("⚡ [TRIGGER] Vibration interrupt fired! Starting 5-second acoustic acquisition...");
+    Serial.println("========================================================");
+    recordAndTransmitAudio("VIBRATION_ACTIVE_INTERRUPT");
   }
-  lastVibeState = currentVibeState;
+
+  // 2. Track raw pin state transitions for diagnostic visibility
+  static int lastPinState = -1;
+  int currentPinState = digitalRead(VIBRATION_PIN);
+  if (currentPinState != lastPinState) {
+    Serial.print("[SENSOR] GPIO 34 Raw Pin Transition -> ");
+    Serial.println(currentPinState == HIGH ? "HIGH (Vibrating / Spring Open)" : "LOW (Idle / Spring Closed)");
+    lastPinState = currentPinState;
+  }
+
+  // 3. Heartbeat log every 3.5 seconds
+  static unsigned long lastHeartbeat = 0;
+  if (millis() - lastHeartbeat >= 3500) {
+    lastHeartbeat = millis();
+    Serial.print("[HEARTBEAT] Armed. GPIO 34 State: ");
+    Serial.print(currentPinState == HIGH ? "HIGH" : "LOW");
+    Serial.println(" | Awaiting physical vibration or Serial CMD:RECORD_5S...");
+  }
 
   // Process incoming Serial commands from FastAPI / Host PC
   while (Serial.available() > 0) {

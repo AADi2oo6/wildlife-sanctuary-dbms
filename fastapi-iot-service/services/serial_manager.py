@@ -5,6 +5,7 @@ import time
 import logging
 import os
 import asyncio
+import collections
 from pathlib import Path
 from typing import Dict, Any, Optional, Callable, List
 
@@ -17,7 +18,8 @@ AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 class SerialNodeListener:
     """
     Dedicated worker thread managing a single node's USB UART serial connection.
-    Listens for framed 5-second WAV audio packets (Zero-SPIFFS DMA stream) and dispatches them.
+    Listens for framed 5-second WAV audio packets (Zero-SPIFFS DMA stream),
+    buffers raw hardware diagnostic logs, and auto-reconnects if unplugged.
     """
 
     def __init__(self, node_id: int, port: str, baud_rate: int = 115200, on_audio_received: Optional[Callable] = None):
@@ -29,29 +31,24 @@ class SerialNodeListener:
         self.ser: Optional[serial.Serial] = None
         self.is_running = False
         self.thread: Optional[threading.Thread] = None
+        self.recent_logs = collections.deque(maxlen=100)
 
         # State machine for stream parsing
         self.is_reading_metadata = False
         self.is_reading_wav = False
         self.metadata: Dict[str, str] = {}
         self.wav_hex_chunks: List[str] = []
+        self._last_error_time: float = 0.0
+        self._last_error_msg: str = ""
 
     def start(self) -> bool:
         if self.is_running:
             return True
 
-        try:
-            logger.info(f"🔌 [SerialManager] Connecting Node #{self.node_id} on {self.port} at {self.baud_rate} baud...")
-            self.ser = serial.Serial(self.port, self.baud_rate, timeout=1.5)
-            self.is_running = True
-            self.thread = threading.Thread(target=self._read_loop, name=f"SerialNode-{self.node_id}", daemon=True)
-            self.thread.start()
-            logger.info(f"✅ [SerialManager] Node #{self.node_id} listener started on {self.port}.")
-            return True
-        except Exception as e:
-            logger.error(f"❌ [SerialManager] Failed to open {self.port} for Node #{self.node_id}: {e}")
-            self.is_running = False
-            return False
+        self.is_running = True
+        self.thread = threading.Thread(target=self._read_loop, name=f"SerialNode-{self.node_id}", daemon=True)
+        self.thread.start()
+        return True
 
     def stop(self):
         logger.info(f"⏹️ [SerialManager] Stopping listener for Node #{self.node_id} on {self.port}...")
@@ -72,16 +69,45 @@ class SerialNodeListener:
             formatted = cmd.strip() + "\n"
             self.ser.write(formatted.encode("utf-8"))
             self.ser.flush()
-            logger.info(f"📤 [SerialManager] Transmitted to Node #{self.node_id}: '{cmd.strip()}'")
+            logger.info(f"📤 [SerialManager] Transmitted to Node #{self.node_id} on {self.port}: '{cmd.strip()}'")
             return True
         except Exception as e:
             logger.error(f"❌ [SerialManager] Failed to transmit command: {e}")
             return False
 
-    def _read_loop(self):
-        time.sleep(1.5) # Wait for ESP32 auto-reset settling
+    def _open_port(self) -> bool:
+        try:
+            self.ser = serial.Serial(self.port, self.baud_rate, timeout=1.0)
+            logger.info(f"✅ [SerialManager] Successfully opened {self.port} at {self.baud_rate} baud for Node #{self.node_id}.")
+            self.recent_logs.append(f"[SYSTEM] Connected to {self.port} at {self.baud_rate} baud.")
+            self._last_error_msg = ""
+            return True
+        except Exception as e:
+            now = time.time()
+            err_str = str(e)
+            if now - self._last_error_time > 30.0 or err_str != self._last_error_msg:
+                self._last_error_time = now
+                self._last_error_msg = err_str
+                logger.warning(f"⏳ [SerialManager] Waiting for {self.port} on Node #{self.node_id} (Hardware not connected or offline)")
+                self.recent_logs.append(f"[SYSTEM_WAIT] Waiting for {self.port} connection...")
+            return False
 
-        while self.is_running and self.ser and self.ser.is_open:
+    def _read_loop(self):
+        # Initial connection attempt
+        while self.is_running and not self.ser:
+            if self._open_port():
+                break
+            time.sleep(5.0)
+
+        time.sleep(1.2) # Wait for ESP32 auto-reset settling
+
+        while self.is_running:
+            if not self.ser or not self.ser.is_open:
+                time.sleep(5.0)
+                if self.is_running:
+                    self._open_port()
+                continue
+
             try:
                 line_bytes = self.ser.readline()
                 if not line_bytes:
@@ -90,6 +116,9 @@ class SerialNodeListener:
                 line = line_bytes.decode("utf-8", errors="replace").strip()
                 if not line:
                     continue
+
+                # Buffer recent log for UI diagnosis
+                self.recent_logs.append(line)
 
                 # 1. Delimiter: Metadata Start
                 if "---START_METADATA---" in line:
@@ -136,14 +165,27 @@ class SerialNodeListener:
                     self.wav_hex_chunks.append(clean_chunk)
                     continue
 
-                # Normal node logging / debug prints
-                logger.debug(f"[ESP32 Node #{self.node_id}] {line}")
+                # Prominent logging of ESP32 sensor notifications & vibration events
+                if any(k in line for k in ["EVENT", "TRIGGER", "VIBRATION", "vibration", "strike", "ERROR", "FATAL", "ACK"]):
+                    logger.info(f"💥 [ESP32 Node #{self.node_id} on {self.port}] {line}")
+                elif any(k in line for k in ["HEARTBEAT", "SENSOR", "STATUS", "PONG"]):
+                    logger.info(f"💓 [ESP32 Node #{self.node_id} on {self.port}] {line}")
+                else:
+                    logger.info(f"📡 [ESP32 Node #{self.node_id} on {self.port}] {line}")
 
             except serial.SerialException as se:
-                logger.error(f"❌ [SerialManager] Serial exception on Node #{self.node_id}: {se}")
-                break
+                logger.error(f"❌ [SerialManager] Serial connection lost on Node #{self.node_id} ({self.port}): {se}")
+                self.recent_logs.append(f"[SYSTEM_ERROR] Connection lost: {se}")
+                if self.ser:
+                    try:
+                        self.ser.close()
+                    except Exception:
+                        pass
+                    self.ser = None
+                time.sleep(3.0)
             except Exception as e:
                 logger.error(f"⚠️ [SerialManager] Parse error on Node #{self.node_id}: {e}")
+                time.sleep(0.5)
 
         self.is_running = False
 
@@ -162,8 +204,9 @@ class SerialNodeListener:
                 f.write(raw_bytes)
 
             logger.info(f"🎉 [SerialManager] Reconstructed WAV saved: {filename} ({len(raw_bytes):,} bytes)")
+            self.recent_logs.append(f"[AUDIO] Reconstructed WAV: {filename} ({len(raw_bytes):,} bytes)")
 
-            # Dispatch payload
+            # Dispatch payload with dual keys for compatibility
             payload = {
                 "node_id": self.node_id,
                 "device_uid": self.metadata.get("DEVICE_UID", "DGN-NODE-67SF-608"),
@@ -171,7 +214,9 @@ class SerialNodeListener:
                 "sample_rate": int(self.metadata.get("SAMPLE_RATE", 16000)),
                 "duration_sec": int(self.metadata.get("DURATION_SEC", 5)),
                 "file_path": str(filepath),
+                "audio_file_path": str(filepath),
                 "relative_url": relative_url,
+                "audio_sample_url": relative_url,
                 "file_size": len(raw_bytes),
                 "timestamp": int(time.time() * 1000)
             }
@@ -190,6 +235,13 @@ class SerialBridgeManager:
     def __init__(self):
         self._listeners: Dict[int, SerialNodeListener] = {}
         self._audio_callbacks: List[Callable] = []
+        self._main_loop: Optional[asyncio.AbstractEventLoop] = None
+
+    def set_event_loop(self, loop: asyncio.AbstractEventLoop):
+        """
+        Store reference to main asyncio loop for thread-safe coroutine dispatching.
+        """
+        self._main_loop = loop
 
     def list_ports(self) -> List[Dict[str, Any]]:
         """
@@ -216,15 +268,14 @@ class SerialBridgeManager:
     def _on_audio_dispatched(self, payload: Dict[str, Any]):
         """
         Internal dispatcher when any node finishes streaming a 5s audio WAV.
+        Dispatches safely onto the main asyncio loop.
         """
         for cb in self._audio_callbacks:
             try:
                 if asyncio.iscoroutinefunction(cb):
-                    # Schedule coroutine in background loop if available
-                    try:
-                        loop = asyncio.get_running_loop()
-                        asyncio.run_coroutine_threadsafe(cb(payload), loop)
-                    except RuntimeError:
+                    if self._main_loop and self._main_loop.is_running():
+                        asyncio.run_coroutine_threadsafe(cb(payload), self._main_loop)
+                    else:
                         asyncio.run(cb(payload))
                 else:
                     cb(payload)
@@ -248,38 +299,39 @@ class SerialBridgeManager:
             self._listeners[node_id] = listener
         return success
 
-    def disconnect_node(self, node_id: int) -> bool:
+    def disconnect_node(self, node_id: int):
         """
-        Safely disconnect serial listener.
+        Stop listener and free the serial port for this node.
         """
         if node_id in self._listeners:
             self._listeners[node_id].stop()
             del self._listeners[node_id]
-            return True
-        return False
 
     def is_listening(self, node_id: int) -> bool:
         listener = self._listeners.get(node_id)
-        return listener.is_running if listener else False
+        return bool(listener and listener.is_running)
 
     def get_listener_status(self, node_id: int) -> Dict[str, Any]:
         listener = self._listeners.get(node_id)
-        if listener and listener.is_running:
-            return {
-                "connected": True,
-                "port": listener.port,
-                "baud_rate": listener.baud_rate,
-                "status": "listening"
-            }
-        return {"connected": False, "port": None, "status": "disconnected"}
+        if not listener:
+            return {"connected": False, "port": None, "baud_rate": None, "is_open": False}
+        return {
+            "connected": listener.is_running,
+            "port": listener.port,
+            "baud_rate": listener.baud_rate,
+            "is_open": bool(listener.ser and listener.ser.is_open)
+        }
+
+    def get_recent_logs(self, node_id: int) -> List[str]:
+        listener = self._listeners.get(node_id)
+        if listener:
+            return list(listener.recent_logs)
+        return []
 
     def trigger_manual_audio(self, node_id: int) -> bool:
-        """
-        Transmit 'CMD:RECORD_5S' command over UART to instruct ESP32 to record 5s now.
-        """
         listener = self._listeners.get(node_id)
         if not listener or not listener.is_running:
-            logger.warning(f"[SerialBridgeManager] Node #{node_id} is not connected to a serial port.")
+            logger.warning(f"[SerialBridgeManager] Cannot trigger manual audio: Node #{node_id} is not connected.")
             return False
         return listener.send_command("CMD:RECORD_5S")
 

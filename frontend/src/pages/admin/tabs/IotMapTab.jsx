@@ -5,12 +5,23 @@ import {
   Radio, MapPin, Search, Plus, Trash2, Battery, BatteryCharging,
   Layers, Globe, Shield, RefreshCw, X, AlertTriangle, CheckCircle, Crosshair,
   Navigation, LocateFixed, PenTool, Shapes, Undo2, Check, Info, Compass,
-  History, Eye, Clock, AlertCircle, ChevronRight, Filter, Activity
+  History, Eye, Clock, AlertCircle, ChevronRight, Filter, Activity,
+  Camera, Video, Mic, Sun, Usb, Cable, Power, Play, Settings, Terminal, Cpu
 } from "lucide-react";
 import api from "../../../api/axiosInstance";
 import { Eyebrow, Badge, Modal, Inp, Sel, inputStyle, SubmitButton } from "../shared/adminComponents";
 import { NODE_STATUS_COLOR } from "../shared/adminConstants";
 import NodeMemoryModal from "./components/NodeMemoryModal";
+import LiveCameraModal from "./components/LiveCameraModal";
+import {
+  fetchComPorts,
+  connectNodeSerial,
+  disconnectNodeSerial,
+  triggerManualAudio,
+  triggerManualSnapshot,
+  fetchNodeLogs,
+  updateNodeHardwareConfig,
+} from "../../../api/hardwareApi";
 
 // Fix Leaflet's default icon paths in bundled environments
 delete L.Icon.Default.prototype._getIconUrl;
@@ -297,6 +308,12 @@ const IotMapTab = ({ toast }) => {
   // Deploy Modal State
   const [showDeployModal, setShowDeployModal] = useState(false);
   const [submittingNode, setSubmittingNode] = useState(false);
+  const [availableComPorts, setAvailableComPorts] = useState([]);
+  const [liveCameraNode, setLiveCameraNode] = useState(null);
+  const [triggeringAudio, setTriggeringAudio] = useState(false);
+  const [triggeringPhoto, setTriggeringPhoto] = useState(false);
+  const [togglingCom, setTogglingCom] = useState(false);
+
   const [nodeForm, setNodeForm] = useState({
     name: "",
     device_uid: "",
@@ -307,8 +324,270 @@ const IotMapTab = ({ toast }) => {
     sensor_type: "ACOUSTIC_VISION",
     zone_id: "",
     custom_area_id: "",
+    com_port: "",
+    baud_rate: "115200",
+    camera_url: "",
+    camera_stream_url: "",
     notes: "",
   });
+
+  // Query hardware COM ports physically connected to the host
+  const refreshComPorts = useCallback(async () => {
+    try {
+      const data = await fetchComPorts();
+      setAvailableComPorts(data.ports || []);
+    } catch (e) {
+      console.warn("COM ports lookup failed:", e);
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshComPorts();
+  }, [refreshComPorts]);
+
+  // Connect or disconnect the Python serial listener for a node
+  const handleToggleCom = async (node) => {
+    if (!node?.node_id) return;
+    setTogglingCom(true);
+    try {
+      if (node.is_listening) {
+        await disconnectNodeSerial(node.node_id);
+        toast(`Released ${node.com_port} listener for ${node.name}.`, "info");
+      } else {
+        await connectNodeSerial(node.node_id);
+        toast(`🔌 Serial bridge connected to ${node.com_port} for ${node.name}!`, "success");
+      }
+      loadData(true);
+      setSelectedNode((prev) =>
+        prev && prev.node_id === node.node_id ? { ...prev, is_listening: !prev.is_listening } : prev
+      );
+    } catch (err) {
+      toast(err.response?.data?.detail || err.message || "Failed to toggle COM port.", "error");
+    } finally {
+      setTogglingCom(false);
+    }
+  };
+
+  const [audioCountdown, setAudioCountdown] = useState(0);
+
+  // Trigger manual 5-second acoustic acquisition from Device 1
+  const handleTriggerAudio = async (node) => {
+    if (!node?.node_id) return;
+    setTriggeringAudio(true);
+    setAudioCountdown(5);
+
+    try {
+      toast(`🎙️ Transmitting CMD:RECORD_5S to Device 1 (${node.com_port || "Serial"})...`, "info");
+      const res = await triggerManualAudio(node.node_id);
+      if (res.status === "success") {
+        toast(`📡 5s Recording command received by ESP32! Acquiring audio...`, "info");
+        
+        // Start visible countdown for operator
+        let remaining = 5;
+        const countdownInterval = setInterval(() => {
+          remaining -= 1;
+          setAudioCountdown(remaining);
+          if (remaining <= 0) {
+            clearInterval(countdownInterval);
+            toast("🧠 Stream received over USB! AI agent analyzing acoustic spectrogram...", "info");
+            setTimeout(() => {
+              loadData(true);
+              handleOpenNodeMemory(node);
+              setTriggeringAudio(false);
+            }, 3000);
+          }
+        }, 1000);
+      } else {
+        toast(res.message || "Manual audio trigger failed.", "error");
+        setTriggeringAudio(false);
+      }
+    } catch (err) {
+      toast(err.response?.data?.detail || "Manual audio failed. Ensure COM port is open.", "error");
+      setTriggeringAudio(false);
+    }
+  };
+
+  // Trigger manual optical snapshot from Device 2 ESP32-CAM
+  const handleTriggerSnapshot = async (node) => {
+    if (!node?.node_id) return;
+    setTriggeringPhoto(true);
+    try {
+      toast(`📸 Capturing snapshot & running Vision AI analysis (${node.camera_url})...`, "info");
+      const res = await triggerManualSnapshot(node.node_id);
+      if (res.status === "success") {
+        toast(`✅ Snapshot captured & analyzed by Vision AI! Saved to Node Memory.`, "success");
+        loadData(true);
+        handleOpenNodeMemory(node);
+      } else {
+        toast(res.message || "Snapshot trigger failed.", "error");
+      }
+    } catch (err) {
+      toast(err.response?.data?.detail || "Snapshot request failed. Check camera URL & Wi-Fi.", "error");
+    } finally {
+      setTriggeringPhoto(false);
+    }
+  };
+
+  // Hardware Config Modal State (for updating COM port, baud rate, and camera URLs)
+  const [showHardwareConfigModal, setShowHardwareConfigModal] = useState(false);
+  const [hardwareConfigNode, setHardwareConfigNode] = useState(null);
+  const [submittingConfig, setSubmittingConfig] = useState(false);
+  const [hardwareForm, setHardwareForm] = useState({
+    com_port: "",
+    baud_rate: "115200",
+    camera_url: "",
+    camera_stream_url: "",
+    connect_serial: true,
+  });
+
+  // Dedicated Inline COM Port Quick Updater for Selected Node Drawer
+  const [inlinePortValue, setInlinePortValue] = useState("");
+  const [updatingInlinePort, setUpdatingInlinePort] = useState(false);
+
+  useEffect(() => {
+    if (selectedNode) {
+      setInlinePortValue(selectedNode.com_port || "");
+    }
+  }, [selectedNode?.node_id, selectedNode?.com_port]);
+
+  const handleQuickUpdatePort = async () => {
+    if (!selectedNode) return;
+    setUpdatingInlinePort(true);
+    try {
+      const portToSave = inlinePortValue.trim();
+
+      // 1. Update backend Postgres DB via Express API
+      await api.patch(`/admin/iot-nodes/${selectedNode.node_id}`, {
+        com_port: portToSave || null,
+        is_listening: Boolean(portToSave),
+      });
+
+      // 2. Synchronize and trigger FastAPI Serial Bridge
+      let listening = Boolean(portToSave);
+      try {
+        const hwRes = await updateNodeHardwareConfig(selectedNode.node_id, {
+          com_port: portToSave,
+          connect_serial: Boolean(portToSave),
+        });
+        if (hwRes && hwRes.is_listening !== undefined) {
+          listening = hwRes.is_listening;
+        }
+      } catch (fastApiErr) {
+        console.warn("FastAPI serial sync note:", fastApiErr);
+      }
+
+      toast(`✅ Serial COM port updated to ${portToSave || "Unassigned"} for ${selectedNode.name}!`, "success");
+      setSelectedNode((prev) =>
+        prev && prev.node_id === selectedNode.node_id
+          ? { ...prev, com_port: portToSave, is_listening: listening }
+          : prev
+      );
+      loadData(true);
+    } catch (err) {
+      toast(err.response?.data?.error || err.response?.data?.detail || "Failed to update COM port.", "error");
+    } finally {
+      setUpdatingInlinePort(false);
+    }
+  };
+
+  const handleOpenHardwareConfig = (node) => {
+    setHardwareConfigNode(node);
+    setHardwareForm({
+      com_port: node.com_port || "",
+      baud_rate: String(node.baud_rate || 115200),
+      camera_url: node.camera_url || "",
+      camera_stream_url: node.camera_stream_url || "",
+      connect_serial: Boolean(node.is_listening || node.com_port),
+    });
+    refreshComPorts();
+    setShowHardwareConfigModal(true);
+  };
+
+  const handleSaveHardwareConfig = async (e) => {
+    e.preventDefault();
+    if (!hardwareConfigNode) return;
+    setSubmittingConfig(true);
+    try {
+      const portVal = hardwareForm.com_port ? hardwareForm.com_port.trim() : null;
+      const baudVal = parseInt(hardwareForm.baud_rate, 10) || 115200;
+      const camVal = hardwareForm.camera_url ? hardwareForm.camera_url.trim() : null;
+      const streamVal = hardwareForm.camera_stream_url ? hardwareForm.camera_stream_url.trim() : null;
+
+      // 1. Save to Express Postgres database
+      await api.patch(`/admin/iot-nodes/${hardwareConfigNode.node_id}`, {
+        com_port: portVal,
+        baud_rate: baudVal,
+        camera_url: camVal,
+        camera_stream_url: streamVal,
+        is_listening: hardwareForm.connect_serial,
+      });
+
+      // 2. Configure FastAPI hardware bridge
+      let isListening = hardwareForm.connect_serial;
+      try {
+        const res = await updateNodeHardwareConfig(hardwareConfigNode.node_id, {
+          com_port: portVal,
+          baud_rate: baudVal,
+          camera_url: camVal,
+          camera_stream_url: streamVal,
+          connect_serial: hardwareForm.connect_serial,
+        });
+        if (res && res.is_listening !== undefined) {
+          isListening = res.is_listening;
+        }
+      } catch (fastApiErr) {
+        console.warn("FastAPI hardware config error:", fastApiErr);
+      }
+
+      toast(`✅ Hardware settings updated for ${hardwareConfigNode.name}!`, "success");
+      setShowHardwareConfigModal(false);
+      loadData(true);
+      setSelectedNode((prev) =>
+        prev && prev.node_id === hardwareConfigNode.node_id
+          ? {
+              ...prev,
+              com_port: portVal,
+              baud_rate: baudVal,
+              camera_url: camVal,
+              camera_stream_url: streamVal,
+              is_listening: isListening,
+            }
+          : prev
+      );
+    } catch (err) {
+      toast(err.response?.data?.error || err.response?.data?.detail || "Failed to update hardware config.", "error");
+    } finally {
+      setSubmittingConfig(false);
+    }
+  };
+
+  // Live Serial Logs Modal State
+  const [showLogsModal, setShowLogsModal] = useState(false);
+  const [logsNode, setLogsNode] = useState(null);
+  const [liveLogs, setLiveLogs] = useState([]);
+  const [loadingLogs, setLoadingLogs] = useState(false);
+
+  const handleOpenLogs = async (node) => {
+    setLogsNode(node);
+    setShowLogsModal(true);
+    setLoadingLogs(true);
+    try {
+      const logs = await fetchNodeLogs(node.node_id);
+      setLiveLogs(logs);
+    } finally {
+      setLoadingLogs(false);
+    }
+  };
+
+  // Auto-refresh live logs every 1.5s when logs modal is open
+  useEffect(() => {
+    if (!showLogsModal || !logsNode) return;
+    const interval = setInterval(async () => {
+      const logs = await fetchNodeLogs(logsNode.node_id);
+      setLiveLogs(logs);
+    }, 1500);
+    return () => clearInterval(interval);
+  }, [showLogsModal, logsNode]);
 
   // Custom Area Modal State
   const [showAreaModal, setShowAreaModal] = useState(false);
@@ -995,6 +1274,33 @@ const IotMapTab = ({ toast }) => {
     );
   };
 
+  // Open Deploy Modal directly with default values & center coordinates
+  const handleOpenDeployModal = () => {
+    const map = mapInstanceRef.current;
+    const center = map ? map.getCenter() : { lat: 22.5, lng: 79.5 };
+    const autoUid = `DGN-NODE-${Math.random().toString(36).substring(2, 6).toUpperCase()}-${Math.floor(100 + Math.random() * 900)}`;
+
+    setNodeForm({
+      name: `Sensor Node ${nodes.length + 1}`,
+      device_uid: autoUid,
+      latitude: center.lat.toFixed(6),
+      longitude: center.lng.toFixed(6),
+      status: "ACTIVE",
+      battery_level: "100",
+      sensor_type: "ACOUSTIC_VISION",
+      zone_id: "",
+      custom_area_id: "",
+      com_port: availableComPorts[0]?.port || "",
+      baud_rate: "115200",
+      camera_url: "",
+      camera_stream_url: "",
+      notes: "",
+    });
+
+    refreshComPorts();
+    setShowDeployModal(true);
+  };
+
   // Submit Deploy Node
   const handleDeploySubmit = async (e) => {
     e.preventDefault();
@@ -1005,14 +1311,30 @@ const IotMapTab = ({ toast }) => {
 
     setSubmittingNode(true);
     try {
-      await api.post("/admin/iot-nodes", {
+      const res = await api.post("/admin/iot-nodes", {
         ...nodeForm,
         battery_level: parseInt(nodeForm.battery_level, 10) || 100,
         zone_id: nodeForm.zone_id ? parseInt(nodeForm.zone_id, 10) : null,
         custom_area_id: nodeForm.custom_area_id ? parseInt(nodeForm.custom_area_id, 10) : null,
+        is_listening: Boolean(nodeForm.com_port),
       });
 
-      toast("IoT Node deployed successfully to sanctuary grid.");
+      const deployedNode = res.data?.node;
+      if (deployedNode && nodeForm.com_port) {
+        try {
+          await updateNodeHardwareConfig(deployedNode.node_id, {
+            com_port: nodeForm.com_port,
+            baud_rate: parseInt(nodeForm.baud_rate, 10) || 115200,
+            camera_url: nodeForm.camera_url,
+            camera_stream_url: nodeForm.camera_stream_url,
+            connect_serial: true,
+          });
+        } catch (hwErr) {
+          console.warn("Auto-connect serial on deployment:", hwErr);
+        }
+      }
+
+      toast("✅ IoT Node deployed successfully to sanctuary grid!", "success");
       setShowDeployModal(false);
       if (tempMarkerRef.current && mapInstanceRef.current) {
         mapInstanceRef.current.removeLayer(tempMarkerRef.current);
@@ -1028,9 +1350,13 @@ const IotMapTab = ({ toast }) => {
         sensor_type: "ACOUSTIC_VISION",
         zone_id: "",
         custom_area_id: "",
+        com_port: "",
+        baud_rate: "115200",
+        camera_url: "",
+        camera_stream_url: "",
         notes: "",
       });
-      loadData();
+      loadData(false);
     } catch (err) {
       toast(err.response?.data?.error || "Failed to deploy IoT node.", "error");
     } finally {
@@ -1231,20 +1557,12 @@ const IotMapTab = ({ toast }) => {
 
               {/* Deploy Node Button */}
               <button
-                onClick={() => {
-                  setDeployMode((prev) => {
-                    if (!prev) setDrawMode(false);
-                    return !prev;
-                  });
-                }}
-                className={`flex items-center justify-center gap-2 rounded-xl py-2.5 px-3 text-xs font-black uppercase tracking-wider transition ${
-                  deployMode
-                    ? "animate-pulse bg-red-500 text-white"
-                    : "bg-lime-400 text-black hover:bg-lime-300 shadow-md"
-                }`}
+                onClick={handleOpenDeployModal}
+                title="Deploy a new IoT sensing node"
+                className="flex items-center justify-center gap-2 rounded-xl py-2.5 px-3 text-xs font-black uppercase tracking-wider transition bg-lime-400 text-black hover:bg-lime-300 shadow-md hover:scale-[1.02] cursor-pointer"
               >
-                {deployMode ? <Crosshair size={14} /> : <Plus size={14} />}
-                {deployMode ? "Cancel" : "Deploy Node"}
+                <Plus size={14} />
+                Deploy Node
               </button>
             </div>
           </div>
@@ -1878,9 +2196,137 @@ const IotMapTab = ({ toast }) => {
                       "{selectedNode.notes}"
                     </div>
                   )}
+
+                  {/* Hardware Interface & Dedicated Port Updater */}
+                  <div className="mt-2 pt-2 border-t border-white/10 flex flex-col gap-2 text-[11px]">
+                    {/* Inline Quick Port Updater */}
+                    <div className="flex flex-col gap-1.5 p-2 rounded-xl bg-white/[0.03] border border-white/10">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-lime-400 flex items-center gap-1">
+                          <Usb size={11} /> Serial COM Port Assignment
+                        </span>
+                        <button
+                          type="button"
+                          onClick={refreshComPorts}
+                          title="Detect physically plugged USB ports"
+                          className="p-1 rounded hover:bg-white/10 text-white/50 hover:text-white transition"
+                        >
+                          <RefreshCw size={10} />
+                        </button>
+                      </div>
+
+                      <div className="flex gap-1.5 items-center">
+                        <input
+                          list="drawer-com-port-list"
+                          value={inlinePortValue}
+                          onChange={(e) => setInlinePortValue(e.target.value)}
+                          placeholder="e.g. COM3 or COM6"
+                          className="flex-1 min-w-0 rounded-lg px-2.5 py-1 text-xs text-white placeholder-white/20 outline-none"
+                          style={{ ...inputStyle, color: "#ffffff", padding: "5px 8px" }}
+                        />
+                        <datalist id="drawer-com-port-list">
+                          {availableComPorts.map((p) => (
+                            <option key={p.port} value={p.port}>
+                              {p.port} - {p.description}
+                            </option>
+                          ))}
+                        </datalist>
+                        <button
+                          type="button"
+                          onClick={handleQuickUpdatePort}
+                          disabled={updatingInlinePort}
+                          className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-lime-400 hover:bg-lime-300 text-black transition disabled:opacity-50 whitespace-nowrap shadow flex items-center gap-1 cursor-pointer"
+                        >
+                          {updatingInlinePort ? "Saving..." : "Update Port"}
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Listener Bridge status & connect toggle */}
+                    {selectedNode.com_port && (
+                      <div className="flex items-center justify-between px-1">
+                        <span className="text-white/60 flex items-center gap-1.5">
+                          <span className={`h-2 w-2 rounded-full ${selectedNode.is_listening ? "bg-emerald-400 animate-pulse" : "bg-red-400"}`} />
+                          Listener Bridge ({selectedNode.com_port}):
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleToggleCom(selectedNode)}
+                          disabled={togglingCom}
+                          className={`px-2 py-0.5 rounded text-[10px] font-bold transition ${
+                            selectedNode.is_listening
+                              ? "bg-red-500/20 text-red-300 hover:bg-red-500/30 border border-red-500/30"
+                              : "bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 border border-emerald-500/30"
+                          } disabled:opacity-40`}
+                        >
+                          {togglingCom ? "Toggling..." : selectedNode.is_listening ? "Disconnect" : "Connect"}
+                        </button>
+                      </div>
+                    )}
+
+                    <div className="flex items-center justify-between px-1">
+                      <span className="flex items-center gap-1 text-white/70">
+                        <Camera size={12} className="text-purple-400" /> Device 2 (Camera):
+                      </span>
+                      <span className="font-mono text-[10px] text-purple-300 truncate max-w-[140px]">
+                        {selectedNode.camera_url ? "ESP32-CAM Ready" : "Unassigned"}
+                      </span>
+                    </div>
+
+                    {/* Quick Config & Diagnostic Tools */}
+                    <div className="flex items-center gap-1.5 pt-1.5 border-t border-white/5">
+                      <button
+                        type="button"
+                        onClick={() => handleOpenHardwareConfig(selectedNode)}
+                        className="flex-1 flex items-center justify-center gap-1 py-1.5 px-2 rounded-lg text-[10px] font-bold bg-white/5 hover:bg-white/10 text-white/80 border border-white/10 transition"
+                      >
+                        <Settings size={11} className="text-lime-400" /> Edit COM / Cam
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleOpenLogs(selectedNode)}
+                        className="flex-1 flex items-center justify-center gap-1 py-1.5 px-2 rounded-lg text-[10px] font-bold bg-white/5 hover:bg-white/10 text-white/80 border border-white/10 transition"
+                      >
+                        <Terminal size={11} className="text-cyan-400" /> Hardware Log
+                      </button>
+                    </div>
+                  </div>
                 </div>
 
-                <div className="mt-3 flex flex-col gap-2 pt-2 border-t" style={{ borderColor: "rgba(255,255,255,0.08)" }}>
+                {/* On-Demand Hardware Action Toolbar */}
+                <div className="mt-3 pt-2 border-t border-white/10 flex flex-col gap-2">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-lime-400">
+                    On-Demand Edge Hardware Controls
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      onClick={() => handleTriggerAudio(selectedNode)}
+                      disabled={triggeringAudio}
+                      className="flex items-center justify-center gap-1.5 py-2 px-2.5 rounded-xl text-[11px] font-bold bg-cyan-500/15 text-cyan-300 hover:bg-cyan-500/25 border border-cyan-500/30 transition disabled:opacity-50"
+                    >
+                      <Mic size={13} className={triggeringAudio ? "animate-spin" : ""} />
+                      {triggeringAudio ? (audioCountdown > 0 ? `Recording (${audioCountdown}s)...` : "Analyzing...") : "Record 5s Audio"}
+                    </button>
+
+                    <button
+                      onClick={() => handleTriggerSnapshot(selectedNode)}
+                      disabled={triggeringPhoto || !selectedNode.camera_url}
+                      className="flex items-center justify-center gap-1.5 py-2 px-2.5 rounded-xl text-[11px] font-bold bg-purple-500/15 text-purple-300 hover:bg-purple-500/25 border border-purple-500/30 transition disabled:opacity-50"
+                    >
+                      <Camera size={13} className={triggeringPhoto ? "animate-spin" : ""} />
+                      {triggeringPhoto ? "Capturing & AI..." : "Capture Photo"}
+                    </button>
+                  </div>
+
+                  <button
+                    onClick={() => setLiveCameraNode(selectedNode)}
+                    className="flex items-center justify-center gap-1.5 w-full py-2 px-3 rounded-xl text-[11px] font-bold bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25 border border-emerald-500/30 transition"
+                  >
+                    <Video size={13} className="text-emerald-400" />
+                    Open Live Video Feed (ESP32-CAM)
+                  </button>
+
                   <button
                     onClick={() => handleOpenNodeMemory(selectedNode)}
                     className="flex items-center justify-center gap-2 w-full rounded-xl py-2 px-3 text-xs font-black text-black bg-lime-400 hover:bg-lime-300 transition shadow-lg shadow-lime-500/20"
@@ -2059,31 +2505,48 @@ const IotMapTab = ({ toast }) => {
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="text-[10px] font-bold uppercase tracking-wider text-lime-300/80">Latitude</label>
-                <Inp
-                  type="number"
-                  step="any"
-                  value={nodeForm.latitude}
-                  onChange={(e) => setNodeForm({ ...nodeForm, latitude: e.target.value })}
-                  placeholder="29.6200"
-                  style={{ ...inputStyle, color: "#ffffff" }}
-                  required
-                />
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-lime-300/80">Geospatial Coordinates</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowDeployModal(false);
+                    setDeployMode(true);
+                    toast("Click anywhere on the map to pinpoint this node's location.", "info");
+                  }}
+                  className="flex items-center gap-1 text-[10px] font-bold text-lime-400 hover:text-lime-300 bg-lime-400/10 hover:bg-lime-400/20 px-2 py-0.5 rounded border border-lime-400/20 transition cursor-pointer"
+                >
+                  <Crosshair size={11} /> Pick on Map
+                </button>
               </div>
 
-              <div>
-                <label className="text-[10px] font-bold uppercase tracking-wider text-lime-300/80">Longitude</label>
-                <Inp
-                  type="number"
-                  step="any"
-                  value={nodeForm.longitude}
-                  onChange={(e) => setNodeForm({ ...nodeForm, longitude: e.target.value })}
-                  placeholder="78.8500"
-                  style={{ ...inputStyle, color: "#ffffff" }}
-                  required
-                />
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[9px] font-medium text-white/50">Latitude</label>
+                  <Inp
+                    type="number"
+                    step="any"
+                    value={nodeForm.latitude}
+                    onChange={(e) => setNodeForm({ ...nodeForm, latitude: e.target.value })}
+                    placeholder="29.6200"
+                    style={{ ...inputStyle, color: "#ffffff" }}
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label className="text-[9px] font-medium text-white/50">Longitude</label>
+                  <Inp
+                    type="number"
+                    step="any"
+                    value={nodeForm.longitude}
+                    onChange={(e) => setNodeForm({ ...nodeForm, longitude: e.target.value })}
+                    placeholder="78.8500"
+                    style={{ ...inputStyle, color: "#ffffff" }}
+                    required
+                  />
+                </div>
               </div>
             </div>
 
@@ -2147,6 +2610,86 @@ const IotMapTab = ({ toast }) => {
               </div>
             </div>
 
+            {/* Hardware Bridge Configuration (COM Port & Camera) */}
+            <div className="rounded-xl p-3 border border-white/10 bg-white/[0.02] flex flex-col gap-2.5">
+              <span className="text-[10px] font-black uppercase tracking-wider text-lime-400 flex items-center gap-1">
+                <Usb size={12} /> Physical Edge Hardware Binding
+              </span>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[10px] font-bold uppercase tracking-wider text-lime-300/80">
+                    Device 1 COM Port (USB Serial)
+                  </label>
+                  <div className="flex gap-1.5 mt-1">
+                    <input
+                      list="com-port-list"
+                      value={nodeForm.com_port}
+                      onChange={(e) => setNodeForm({ ...nodeForm, com_port: e.target.value })}
+                      placeholder="e.g. COM3 or COM5"
+                      className="w-full rounded-lg px-2.5 py-1.5 text-xs text-white placeholder-white/20 outline-none"
+                      style={{ ...inputStyle, color: "#ffffff" }}
+                    />
+                    <datalist id="com-port-list">
+                      {availableComPorts.map((p) => (
+                        <option key={p.port} value={p.port}>
+                          {p.port} - {p.description}
+                        </option>
+                      ))}
+                    </datalist>
+                    <button
+                      type="button"
+                      onClick={refreshComPorts}
+                      title="Detect physically plugged USB ports"
+                      className="px-2 rounded-lg bg-white/10 hover:bg-white/20 text-white/70 hover:text-white transition"
+                    >
+                      <RefreshCw size={12} />
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-[10px] font-bold uppercase tracking-wider text-lime-300/80">Baud Rate</label>
+                  <Sel
+                    value={nodeForm.baud_rate}
+                    onChange={(e) => setNodeForm({ ...nodeForm, baud_rate: e.target.value })}
+                    style={{ ...inputStyle, color: "#ffffff", background: "#0d1a0f", marginTop: "4px" }}
+                  >
+                    <option value="115200" style={{ background: "#0d1a0f", color: "#ffffff" }}>115200 baud (Default)</option>
+                    <option value="9600" style={{ background: "#0d1a0f", color: "#ffffff" }}>9600 baud</option>
+                    <option value="57600" style={{ background: "#0d1a0f", color: "#ffffff" }}>57600 baud</option>
+                    <option value="230400" style={{ background: "#0d1a0f", color: "#ffffff" }}>230400 baud</option>
+                  </Sel>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[10px] font-bold uppercase tracking-wider text-purple-300/80">
+                    Device 2 Snapshot URL (/capture)
+                  </label>
+                  <Inp
+                    value={nodeForm.camera_url}
+                    onChange={(e) => setNodeForm({ ...nodeForm, camera_url: e.target.value })}
+                    placeholder="http://192.168.1.105/capture"
+                    style={{ ...inputStyle, color: "#ffffff" }}
+                  />
+                </div>
+
+                <div>
+                  <label className="text-[10px] font-bold uppercase tracking-wider text-purple-300/80">
+                    Device 2 Video Stream URL (/stream)
+                  </label>
+                  <Inp
+                    value={nodeForm.camera_stream_url}
+                    onChange={(e) => setNodeForm({ ...nodeForm, camera_stream_url: e.target.value })}
+                    placeholder="http://192.168.1.105:81/stream"
+                    style={{ ...inputStyle, color: "#ffffff" }}
+                  />
+                </div>
+              </div>
+            </div>
+
             <div>
               <label className="text-[10px] font-bold uppercase tracking-wider text-lime-300/80">Deployment Notes</label>
               <textarea
@@ -2190,6 +2733,212 @@ const IotMapTab = ({ toast }) => {
             error: (msg) => toast(msg, "error"),
           }}
         />
+      )}
+
+      {/* ── Live ESP32-CAM Video Stream Modal ── */}
+      {liveCameraNode && (
+        <LiveCameraModal
+          node={liveCameraNode}
+          onClose={() => setLiveCameraNode(null)}
+          onSnapshotTaken={(data) => {
+            loadData(true);
+            handleOpenNodeMemory(liveCameraNode);
+          }}
+          toast={(msg, type) => toast(msg, type)}
+        />
+      )}
+
+      {/* ── Edit Hardware Configuration Modal ── */}
+      {showHardwareConfigModal && hardwareConfigNode && (
+        <Modal
+          title={`Configure Edge Hardware Binding — ${hardwareConfigNode.name}`}
+          onClose={() => setShowHardwareConfigModal(false)}
+        >
+          <form onSubmit={handleSaveHardwareConfig} className="flex flex-col gap-3">
+            <div className="rounded-xl p-3 border border-white/10 bg-white/[0.02] flex flex-col gap-2.5">
+              <span className="text-[10px] font-black uppercase tracking-wider text-lime-400 flex items-center gap-1">
+                <Usb size={12} /> Device 1: Acoustic & Vibration Sensor (USB UART)
+              </span>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[10px] font-bold uppercase tracking-wider text-lime-300/80">
+                    COM / Serial Port
+                  </label>
+                  <div className="flex gap-1.5 mt-1">
+                    <input
+                      list="edit-com-port-list"
+                      value={hardwareForm.com_port}
+                      onChange={(e) => setHardwareForm({ ...hardwareForm, com_port: e.target.value })}
+                      placeholder="e.g. COM3 or COM5"
+                      className="w-full rounded-lg px-2.5 py-1.5 text-xs text-white placeholder-white/20 outline-none"
+                      style={{ ...inputStyle, color: "#ffffff" }}
+                    />
+                    <datalist id="edit-com-port-list">
+                      {availableComPorts.map((p) => (
+                        <option key={p.port} value={p.port}>
+                          {p.port} - {p.description}
+                        </option>
+                      ))}
+                    </datalist>
+                    <button
+                      type="button"
+                      onClick={refreshComPorts}
+                      title="Detect physically plugged USB ports"
+                      className="px-2 rounded-lg bg-white/10 hover:bg-white/20 text-white/70 hover:text-white transition"
+                    >
+                      <RefreshCw size={12} />
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-[10px] font-bold uppercase tracking-wider text-lime-300/80">Baud Rate</label>
+                  <Sel
+                    value={hardwareForm.baud_rate}
+                    onChange={(e) => setHardwareForm({ ...hardwareForm, baud_rate: e.target.value })}
+                    style={{ ...inputStyle, color: "#ffffff", background: "#0d1a0f", marginTop: "4px" }}
+                  >
+                    <option value="115200" style={{ background: "#0d1a0f", color: "#ffffff" }}>115200 baud (Default)</option>
+                    <option value="9600" style={{ background: "#0d1a0f", color: "#ffffff" }}>9600 baud</option>
+                    <option value="57600" style={{ background: "#0d1a0f", color: "#ffffff" }}>57600 baud</option>
+                    <option value="230400" style={{ background: "#0d1a0f", color: "#ffffff" }}>230400 baud</option>
+                  </Sel>
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-xl p-3 border border-white/10 bg-white/[0.02] flex flex-col gap-2.5">
+              <span className="text-[10px] font-black uppercase tracking-wider text-purple-400 flex items-center gap-1">
+                <Camera size={12} /> Device 2: Optical Surveillance (ESP32-CAM)
+              </span>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[10px] font-bold uppercase tracking-wider text-purple-300/80">
+                    Snapshot URL (/capture)
+                  </label>
+                  <Inp
+                    value={hardwareForm.camera_url}
+                    onChange={(e) => setHardwareForm({ ...hardwareForm, camera_url: e.target.value })}
+                    placeholder="http://192.168.1.105/capture"
+                    style={{ ...inputStyle, color: "#ffffff" }}
+                  />
+                </div>
+
+                <div>
+                  <label className="text-[10px] font-bold uppercase tracking-wider text-purple-300/80">
+                    Live Video Stream URL (/stream)
+                  </label>
+                  <Inp
+                    value={hardwareForm.camera_stream_url}
+                    onChange={(e) => setHardwareForm({ ...hardwareForm, camera_stream_url: e.target.value })}
+                    placeholder="http://192.168.1.105:81/stream"
+                    style={{ ...inputStyle, color: "#ffffff" }}
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 p-2 rounded-xl bg-white/[0.03] border border-white/5">
+              <input
+                type="checkbox"
+                id="connect-serial-check"
+                checked={hardwareForm.connect_serial}
+                onChange={(e) => setHardwareForm({ ...hardwareForm, connect_serial: e.target.checked })}
+                className="h-4 w-4 rounded accent-lime-400"
+              />
+              <label htmlFor="connect-serial-check" className="text-xs text-white/80 cursor-pointer select-none">
+                Continuously monitor and listen on this COM port immediately
+              </label>
+            </div>
+
+            <div className="mt-2 flex justify-end gap-2 border-t border-white/10 pt-3">
+              <button
+                type="button"
+                onClick={() => setShowHardwareConfigModal(false)}
+                className="rounded-xl px-4 py-2 text-xs font-bold text-white/50 hover:text-white transition"
+              >
+                Cancel
+              </button>
+              <SubmitButton
+                submitting={submittingConfig}
+                label="Update Port & Hardware Settings"
+                loadingLabel="Updating..."
+              >
+                Update Port & Hardware Settings
+              </SubmitButton>
+            </div>
+          </form>
+        </Modal>
+      )}
+
+      {/* ── Real-Time Serial Hardware Diagnostic Log Modal ── */}
+      {showLogsModal && logsNode && (
+        <Modal
+          title={`Serial Hardware Log — ${logsNode.name} (${logsNode.com_port || "COM"})`}
+          onClose={() => setShowLogsModal(false)}
+        >
+          <div className="flex flex-col gap-3">
+            <div className="flex items-center justify-between text-xs text-white/60">
+              <div className="flex items-center gap-2">
+                <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+                <span className="font-mono">Live Serial Stream (auto-polling every 1.5s)</span>
+              </div>
+              <button
+                onClick={() => handleOpenLogs(logsNode)}
+                className="flex items-center gap-1 text-[11px] text-lime-400 hover:text-lime-300 transition"
+              >
+                <RefreshCw size={11} className={loadingLogs ? "animate-spin" : ""} /> Refresh Now
+              </button>
+            </div>
+
+            <div
+              className="rounded-xl p-3 h-72 overflow-y-auto font-mono text-xs flex flex-col gap-1 border border-white/10"
+              style={{ background: "#050b07", color: "#86efac" }}
+            >
+              {liveLogs.length === 0 ? (
+                <div className="text-white/40 italic p-4 text-center">
+                  No serial logs received yet on {logsNode.com_port || "configured port"}. Ensure Device 1 is plugged in and the listener bridge is connected.
+                </div>
+              ) : (
+                liveLogs.map((logLine, idx) => {
+                  const isVibe = logLine.includes("VIBRATION") || logLine.includes("strike") || logLine.includes("EVENT");
+                  const isHeartbeat = logLine.includes("HEARTBEAT");
+                  const isErr = logLine.includes("ERROR") || logLine.includes("FATAL");
+
+                  return (
+                    <div
+                      key={idx}
+                      className={`leading-relaxed px-1.5 py-0.5 rounded ${
+                        isVibe
+                          ? "bg-red-500/20 text-red-300 font-bold border-l-2 border-red-500"
+                          : isHeartbeat
+                          ? "text-sky-300"
+                          : isErr
+                          ? "bg-amber-500/20 text-amber-300"
+                          : "text-emerald-400/90"
+                      }`}
+                    >
+                      {logLine}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            <div className="flex items-center justify-between text-[11px] text-white/50 border-t border-white/10 pt-2">
+              <span>💡 Tap the vibration sensor on GPIO 34 to observe the strike impulse above.</span>
+              <button
+                type="button"
+                onClick={() => setShowLogsModal(false)}
+                className="px-4 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-white text-xs font-bold transition"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </Modal>
       )}
     </div>
   );

@@ -30,6 +30,20 @@ async def lifespan(app: FastAPI):
         await init_db_pool()
         init_event_pipeline()
         logger.info("📡 Ready to ingest IoT device telemetry and acoustic threat packets.")
+
+        # Auto-connect serial listeners for actively listening nodes
+        try:
+            from database import get_pool
+            from services.serial_manager import serial_bridge
+            pool = get_pool()
+            async with pool.acquire() as conn:
+                listening_nodes = await conn.fetch("SELECT node_id, name, com_port, baud_rate FROM iot_nodes WHERE is_listening = true AND com_port IS NOT NULL;")
+                for n in listening_nodes:
+                    logger.info(f"🔄 [Startup] Auto-resuming serial listener for Node #{n['node_id']} ({n['name']}) on {n['com_port']}...")
+                    serial_bridge.connect_node(n["node_id"], n["com_port"], n["baud_rate"] or 115200)
+        except Exception as conn_err:
+            logger.warning(f"Could not auto-resume serial listeners: {conn_err}")
+
     except Exception as e:
         logger.error(f"⚠️ Database initialization failed on startup: {e}")
     yield

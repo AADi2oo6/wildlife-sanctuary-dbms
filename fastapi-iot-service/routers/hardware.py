@@ -2,10 +2,19 @@ from fastapi import APIRouter, HTTPException, BackgroundTasks
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
 import logging
+import json
+from datetime import datetime, timezone
 
-from database import get_node_by_identifier, update_node_hardware_config
+from database import (
+    get_node_by_identifier,
+    update_node_hardware_config,
+    insert_trigger_event,
+    update_node_status,
+)
 from services.serial_manager import serial_bridge
 from services.camera_client import CameraClient
+from services.ai_vision_agent import vision_ai_agent
+from routers.websocket_manager import manager
 
 logger = logging.getLogger("fastapi_iot.hardware")
 router = APIRouter(prefix="/api/hardware", tags=["Hardware Bridge & On-Demand Control"])
@@ -16,6 +25,13 @@ class ConnectPortRequest(BaseModel):
 
 class FlashToggleRequest(BaseModel):
     enable: bool = Field(..., description="True to turn flash ON, False to turn OFF")
+
+class NodeHardwareConfigUpdate(BaseModel):
+    com_port: Optional[str] = Field(None, description="USB Serial COM Port (e.g. 'COM3' or 'COM5')")
+    baud_rate: Optional[int] = Field(115200, description="Serial baud rate")
+    camera_url: Optional[str] = Field(None, description="Snapshot endpoint (e.g. 'http://192.168.1.105/capture')")
+    camera_stream_url: Optional[str] = Field(None, description="Live MJPEG stream endpoint (e.g. 'http://192.168.1.105:81/stream')")
+    connect_serial: Optional[bool] = Field(False, description="Immediately connect serial listener if port specified")
 
 @router.get("/com-ports")
 async def get_available_com_ports():
@@ -116,6 +132,61 @@ async def get_node_hardware_status(node_id: int):
         }
     }
 
+@router.get("/nodes/{node_id}/logs")
+async def get_node_hardware_logs(node_id: int):
+    """
+    Retrieve real-time serial hardware log lines received from Device 1 on the COM port.
+    """
+    logs = serial_bridge.get_recent_logs(node_id)
+    return {
+        "status": "success",
+        "node_id": node_id,
+        "count": len(logs),
+        "logs": logs
+    }
+
+@router.patch("/nodes/{node_id}/config")
+async def update_node_hardware_configuration(node_id: int, payload: NodeHardwareConfigUpdate):
+    """
+    Update node COM port, baud rate, and camera URLs. Reconnects serial bridge if requested.
+    """
+    node = await get_node_by_identifier(str(node_id))
+    if not node:
+        raise HTTPException(status_code=404, detail=f"IoT Node ID {node_id} not found.")
+
+    new_port = payload.com_port.strip() if payload.com_port else None
+    new_baud = payload.baud_rate or 115200
+    new_cam_url = payload.camera_url.strip() if payload.camera_url else None
+    new_stream_url = payload.camera_stream_url.strip() if payload.camera_stream_url else None
+
+    # Save to database
+    await update_node_hardware_config(
+        node_id=node_id,
+        com_port=new_port,
+        baud_rate=new_baud,
+        camera_url=new_cam_url,
+        camera_stream_url=new_stream_url,
+        is_listening=payload.connect_serial if payload.connect_serial is not None else node.get("is_listening", False)
+    )
+
+    # Manage serial connection
+    serial_connected = False
+    if payload.connect_serial and new_port:
+        serial_connected = serial_bridge.connect_node(node_id, new_port, new_baud)
+    elif payload.com_port and serial_bridge.is_listening(node_id):
+        # Port changed while listening, reconnect to new port
+        serial_connected = serial_bridge.connect_node(node_id, new_port, new_baud)
+
+    return {
+        "status": "success",
+        "message": f"Hardware configuration updated for Node #{node_id}.",
+        "com_port": new_port,
+        "baud_rate": new_baud,
+        "camera_url": new_cam_url,
+        "camera_stream_url": new_stream_url,
+        "is_listening": serial_connected or serial_bridge.is_listening(node_id)
+    }
+
 @router.post("/nodes/{node_id}/manual-audio")
 async def trigger_manual_audio_record(node_id: int):
     """
@@ -153,7 +224,8 @@ async def trigger_manual_audio_record(node_id: int):
 @router.post("/nodes/{node_id}/manual-snapshot")
 async def trigger_manual_camera_snapshot(node_id: int):
     """
-    Command Device 2 (ESP32-CAM) to capture an immediate high-resolution snapshot right now.
+    Command Device 2 (ESP32-CAM) to capture an immediate high-resolution snapshot right now,
+    run the Vision AI Agent, save the event to Supabase, and broadcast over WebSocket.
     """
     node = await get_node_by_identifier(str(node_id))
     if not node:
@@ -166,6 +238,7 @@ async def trigger_manual_camera_snapshot(node_id: int):
             detail="Node has no camera_url configured (e.g. 'http://192.168.1.105/capture')."
         )
 
+    # 1. Capture snapshot from ESP32-CAM
     snapshot_result = await CameraClient.capture_snapshot(camera_url, node_id=node_id)
     if not snapshot_result or not snapshot_result.get("success"):
         raise HTTPException(
@@ -173,10 +246,75 @@ async def trigger_manual_camera_snapshot(node_id: int):
             detail=f"Failed to capture snapshot from ESP32-CAM at {camera_url}. Ensure device is powered and connected to Wi-Fi."
         )
 
+    # 2. Run Vision AI Agent on captured snapshot
+    snapshot_path = snapshot_result.get("file_path")
+    relative_url = snapshot_result.get("relative_url")
+
+    logger.info(f"👁️ [ManualSnapshot] Running Vision AI Agent on {snapshot_path}...")
+    vision_diag = await vision_ai_agent.analyze_image(
+        snapshot_path,
+        context=f"Operator requested forensic manual snapshot from Node #{node_id} ({node.get('name')})"
+    )
+
+    is_threat = vision_diag.get("visual_threat", False)
+    vision_score = float(vision_diag.get("vision_score", 0.0)) / 100.0 if vision_diag.get("vision_score") else 0.0
+    severity = "ALERT" if is_threat or vision_score >= 0.7 else "INFO"
+    threat_type = vision_diag.get("threat_type", "OPTICAL_INSPECTION")
+
+    # 3. Persist compound event in Supabase
+    created_event = await insert_trigger_event(
+        node_id=node_id,
+        trigger_type=f"MANUAL_SNAPSHOT_{threat_type}",
+        severity=severity,
+        decibel_level=None,
+        confidence=1.0,
+        details=f"Manual Snapshot captured by operator. Vision AI: {vision_diag.get('reasoning', 'Optical inspection complete.')}",
+        audio_sample_url=None,
+        image_snapshot_url=relative_url,
+        audio_ai_analysis=None,
+        vision_ai_analysis=json.dumps(vision_diag),
+        vision_score=vision_score,
+        is_manual=True
+    )
+    event_id = created_event.get("event_id")
+
+    # Update Node status if threat detected
+    if severity == "ALERT":
+        await update_node_status(node_id=node_id, status="ALERT")
+
+    # 4. Broadcast over WebSocket to update map and node history immediately
+    broadcast_data = {
+        "event": "telemetry_update",
+        "node_id": node_id,
+        "device_uid": node.get("device_uid"),
+        "node_name": node.get("name"),
+        "node_status": "ALERT" if severity == "ALERT" else node.get("status", "ACTIVE"),
+        "battery_level": node.get("battery_level", 95),
+        "sound_level_db": None,
+        "threat_type": f"MANUAL_SNAPSHOT_{threat_type}",
+        "severity": severity,
+        "is_anomaly": (severity == "ALERT"),
+        "trigger_event_id": event_id,
+        "confidence": 1.0,
+        "audio_sample_url": None,
+        "image_snapshot_url": relative_url,
+        "audio_ai_analysis": None,
+        "vision_ai_analysis": vision_diag,
+        "vision_score": vision_score,
+        "is_manual": True,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+    await manager.broadcast(broadcast_data)
+
+    logger.info(f"✅ [ManualSnapshot] Created Event #{event_id} and broadcasted successfully.")
+
     return {
         "status": "success",
-        "message": "Snapshot photo captured successfully from ESP32-CAM.",
-        "snapshot": snapshot_result
+        "message": "Snapshot photo captured and analyzed by Vision AI successfully.",
+        "event_id": event_id,
+        "snapshot": snapshot_result,
+        "vision_ai": vision_diag,
+        "severity": severity
     }
 
 @router.post("/nodes/{node_id}/flash")

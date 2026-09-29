@@ -18,9 +18,22 @@ import {
   ChevronUp,
   MapPin,
   TrendingUp,
+  Camera,
+  Eye,
+  Mic,
+  Brain,
+  ExternalLink,
+  ShieldAlert,
+  Layers,
+  Maximize2,
+  FileAudio,
+  Image as ImageIcon,
+  CheckCircle2,
+  ChevronRight,
 } from "lucide-react";
 import { Badge } from "../../shared/adminComponents";
 import api from "../../../../api/axiosInstance";
+import { getAssetUrl } from "../../../../api/hardwareApi";
 
 const SEVERITY_COLORS = {
   ALERT: "#ef4444",
@@ -93,6 +106,18 @@ export const NodeMemoryModal = ({ node, onClose, onTriggerLogged, toast }) => {
   const [metricMode, setMetricMode] = useState("decibel"); // 'decibel' | 'confidence'
   const [selectedTrigger, setSelectedTrigger] = useState(null);
   const [hoveredTrigger, setHoveredTrigger] = useState(null);
+  const [enlargedImage, setEnlargedImage] = useState(null);
+
+  // Parse JSON forensic data safely
+  const parseJsonSafely = (val) => {
+    if (!val) return null;
+    if (typeof val === "object") return val;
+    try {
+      return JSON.parse(val);
+    } catch (e) {
+      return null;
+    }
+  };
 
   // Simulation Form State
   const [showSimulate, setShowSimulate] = useState(false);
@@ -851,71 +876,361 @@ export const NodeMemoryModal = ({ node, onClose, onTriggerLogged, toast }) => {
         </div>
 
         {/* ── SELECTED TRIGGER INSPECTION CARD ── */}
-        {activeInspectTrigger && (
-          <div
-            className="mx-6 mb-4 p-4 rounded-xl border flex flex-col md:flex-row items-start md:items-center justify-between gap-4 transition"
-            style={{
-              background: "rgba(163,230,53,0.04)",
-              borderColor: `${activeInspectTrigger.color}44`,
-              boxShadow: `0 4px 20px ${activeInspectTrigger.color}15`,
-            }}
-          >
-            <div className="flex items-start gap-3">
-              <div
-                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-lg"
-                style={{
-                  background: `${activeInspectTrigger.color}20`,
-                  border: `1px solid ${activeInspectTrigger.color}40`,
-                }}
-              >
-                {activeInspectTrigger.trigger_type.includes("GUNSHOT")
-                  ? "💥"
-                  : activeInspectTrigger.trigger_type.includes("CHAINSAW") || activeInspectTrigger.trigger_type.includes("ACOUSTIC")
-                  ? "🪚"
-                  : activeInspectTrigger.trigger_type.includes("PIR")
-                  ? "🚶"
-                  : activeInspectTrigger.trigger_type.includes("ANIMAL")
-                  ? "🐘"
-                  : activeInspectTrigger.trigger_type.includes("FIRE")
-                  ? "🔥"
-                  : "📡"}
-              </div>
+        {activeInspectTrigger && (() => {
+          const audioDiag = parseJsonSafely(activeInspectTrigger.audio_ai_analysis);
+          const visionDiag = parseJsonSafely(activeInspectTrigger.vision_ai_analysis);
+          const hasAudio = Boolean(activeInspectTrigger.audio_sample_url);
+          const hasImage = Boolean(activeInspectTrigger.image_snapshot_url);
+          const audioConfPercent = audioDiag?.confidence_score
+            ? Number(audioDiag.confidence_score).toFixed(1)
+            : activeInspectTrigger.confidence
+            ? (Number(activeInspectTrigger.confidence) * 100).toFixed(1)
+            : null;
+          const visionScorePercent = visionDiag?.threat_score
+            ? Number(visionDiag.threat_score).toFixed(1)
+            : activeInspectTrigger.vision_score
+            ? (Number(activeInspectTrigger.vision_score) * 100).toFixed(1)
+            : null;
 
-              <div>
-                <div className="flex items-center gap-2">
-                  <h4 className="text-xs font-black text-white">
-                    {activeInspectTrigger.trigger_type.replace(/_/g, " ")}
-                  </h4>
-                  <Badge label={activeInspectTrigger.severity} color={activeInspectTrigger.color} />
+          return (
+            <div
+              className="mx-6 mb-4 p-4 rounded-2xl border flex flex-col gap-4 transition"
+              style={{
+                background: "rgba(10,22,14,0.75)",
+                borderColor: `${activeInspectTrigger.color}44`,
+                boxShadow: `0 8px 32px ${activeInspectTrigger.color}15`,
+              }}
+            >
+              {/* Header Row */}
+              <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-3 border-b border-white/10 pb-3">
+                <div className="flex items-center gap-3">
+                  <div
+                    className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-xl shadow-md"
+                    style={{
+                      background: `${activeInspectTrigger.color}25`,
+                      border: `1px solid ${activeInspectTrigger.color}55`,
+                    }}
+                  >
+                    {activeInspectTrigger.trigger_type.includes("GUNSHOT")
+                      ? "💥"
+                      : activeInspectTrigger.trigger_type.includes("CHAINSAW") || activeInspectTrigger.trigger_type.includes("ACOUSTIC")
+                      ? "🪚"
+                      : activeInspectTrigger.trigger_type.includes("PIR")
+                      ? "🚶"
+                      : activeInspectTrigger.trigger_type.includes("ANIMAL")
+                      ? "🐘"
+                      : activeInspectTrigger.trigger_type.includes("FIRE")
+                      ? "🔥"
+                      : "📡"}
+                  </div>
+
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h4 className="text-sm font-black text-white">
+                        {activeInspectTrigger.trigger_type.replace(/_/g, " ")}
+                      </h4>
+                      <Badge label={activeInspectTrigger.severity} color={activeInspectTrigger.color} />
+                      {activeInspectTrigger.is_manual && (
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-400/20 text-amber-300 border border-amber-400/40">
+                          ⚙️ Operator On-Demand
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-white/70 mt-0.5">
+                      Event ID: #{activeInspectTrigger.event_id} &bull; Recorded at{" "}
+                      <span className="text-white font-mono font-bold">
+                        {new Date(activeInspectTrigger.triggered_at).toLocaleString()}
+                      </span>
+                    </p>
+                  </div>
                 </div>
-                <p className="text-xs text-white/80 mt-1 max-w-xl">
-                  {activeInspectTrigger.details || "No diagnostic notes attached."}
-                </p>
-              </div>
-            </div>
 
-            <div className="flex items-center gap-4 text-xs font-mono shrink-0">
-              <div className="text-right">
-                <p className="text-[10px] uppercase text-white/40">Timestamp</p>
-                <p className="text-white font-bold">
-                  {new Date(activeInspectTrigger.triggered_at).toLocaleString()}
-                </p>
+                <div className="flex items-center gap-4 text-xs font-mono shrink-0">
+                  <div className="text-right">
+                    <p className="text-[10px] uppercase text-white/40 font-sans">Decibel Level</p>
+                    <p className="text-lime-300 font-bold text-sm">
+                      {activeInspectTrigger.decibel_level ? `${activeInspectTrigger.decibel_level} dB` : "--"}
+                    </p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-[10px] uppercase text-white/40 font-sans">Acoustic Conf</p>
+                    <p className="text-cyan-300 font-bold text-sm">
+                      {audioConfPercent ? `${audioConfPercent}%` : "--"}
+                    </p>
+                  </div>
+                  {visionScorePercent && (
+                    <div className="text-right">
+                      <p className="text-[10px] uppercase text-white/40 font-sans">Vision Score</p>
+                      <p className="text-purple-300 font-bold text-sm">
+                        {visionScorePercent}%
+                      </p>
+                    </div>
+                  )}
+                </div>
               </div>
-              <div className="text-right">
-                <p className="text-[10px] uppercase text-white/40">Decibel</p>
-                <p className="text-lime-300 font-bold">
-                  {activeInspectTrigger.decibel_level ? `${activeInspectTrigger.decibel_level} dB` : "--"}
-                </p>
+
+              {/* Multi-Tier Escalation Stepper Bar */}
+              <div className="flex flex-wrap items-center gap-2 text-[10px] bg-black/40 rounded-xl p-2.5 border border-white/5">
+                <span className="font-bold uppercase tracking-wider text-lime-400 shrink-0 flex items-center gap-1">
+                  <Layers size={12} /> Edge Escalation Chain:
+                </span>
+                <span className="flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-500/15 text-emerald-300 border border-emerald-500/25">
+                  <CheckCircle2 size={10} /> 1. Seismic Wake (GPIO 34)
+                </span>
+                <ChevronRight size={11} className="text-white/30" />
+                <span className={`flex items-center gap-1 px-2 py-0.5 rounded-md border ${
+                  hasAudio
+                    ? "bg-blue-500/15 text-blue-300 border-blue-500/25"
+                    : "bg-white/5 text-white/40 border-white/10"
+                }`}>
+                  <Mic size={10} /> 2. 5s I2S Mic Stream {hasAudio ? "✓" : ""}
+                </span>
+                <ChevronRight size={11} className="text-white/30" />
+                <span className={`flex items-center gap-1 px-2 py-0.5 rounded-md border ${
+                  audioDiag
+                    ? "bg-cyan-500/15 text-cyan-300 border-cyan-500/25"
+                    : "bg-white/5 text-white/40 border-white/10"
+                }`}>
+                  <Brain size={10} /> 3. Audio AI (Whisper+GPT-4o) {audioDiag ? "✓" : ""}
+                </span>
+                <ChevronRight size={11} className="text-white/30" />
+                <span className={`flex items-center gap-1 px-2 py-0.5 rounded-md border ${
+                  hasImage
+                    ? "bg-amber-500/15 text-amber-300 border-amber-500/25"
+                    : "bg-white/5 text-white/40 border-white/10"
+                }`}>
+                  <Camera size={10} /> 4. ESP32-CAM Snapshot {hasImage ? "✓" : ""}
+                </span>
+                <ChevronRight size={11} className="text-white/30" />
+                <span className={`flex items-center gap-1 px-2 py-0.5 rounded-md border ${
+                  visionDiag
+                    ? "bg-purple-500/15 text-purple-300 border-purple-500/25"
+                    : "bg-white/5 text-white/40 border-white/10"
+                }`}>
+                  <Eye size={10} /> 5. Vision AI Diagnosis {visionDiag ? "✓" : ""}
+                </span>
               </div>
-              <div className="text-right">
-                <p className="text-[10px] uppercase text-white/40">AI Confidence</p>
-                <p className="text-cyan-300 font-bold">
-                  {activeInspectTrigger.confidence ? `${(Number(activeInspectTrigger.confidence) * 100).toFixed(1)}%` : "--"}
-                </p>
+
+              {/* Multi-Modal Forensic Details Grid */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                {/* ── Acoustic Forensic Panel ── */}
+                <div
+                  className="rounded-xl p-3.5 border flex flex-col justify-between"
+                  style={{
+                    background: "rgba(14, 165, 233, 0.04)",
+                    borderColor: "rgba(14, 165, 233, 0.25)",
+                  }}
+                >
+                  <div>
+                    <div className="flex items-center justify-between pb-2 border-b border-white/5">
+                      <div className="flex items-center gap-2">
+                        <Volume2 size={15} className="text-cyan-400" />
+                        <span className="text-xs font-black uppercase tracking-wider text-cyan-300">
+                          Acoustic Forensics
+                        </span>
+                      </div>
+                      {hasAudio && (
+                        <a
+                          href={getAssetUrl(activeInspectTrigger.audio_sample_url)}
+                          download
+                          target="_blank"
+                          rel="noreferrer"
+                          className="flex items-center gap-1 text-[10px] text-cyan-400 hover:text-cyan-300 transition"
+                        >
+                          <ExternalLink size={11} /> Download WAV
+                        </a>
+                      )}
+                    </div>
+
+                    {hasAudio ? (
+                      <div className="mt-3">
+                        <label className="text-[10px] uppercase font-bold text-white/50 flex items-center gap-1">
+                          <FileAudio size={11} /> 5-Second 16kHz PCM Audio Capture
+                        </label>
+                        <audio
+                          controls
+                          src={getAssetUrl(activeInspectTrigger.audio_sample_url)}
+                          className="w-full mt-1.5 h-8 rounded-lg accent-lime-400"
+                        />
+                      </div>
+                    ) : (
+                      <div className="mt-3 p-3 rounded-lg bg-white/[0.02] border border-white/5 text-xs text-white/40 italic">
+                        No raw audio WAV packet attached to this trigger event.
+                      </div>
+                    )}
+
+                    {audioDiag ? (
+                      <div className="mt-3 space-y-2 text-xs">
+                        <div className="flex items-center justify-between">
+                          <span className="text-white/60">Classified Threat:</span>
+                          <span className="font-bold text-lime-400 uppercase tracking-wide">
+                            {audioDiag.threat_category || activeInspectTrigger.trigger_type}
+                          </span>
+                        </div>
+
+                        {audioConfPercent && (
+                          <div>
+                            <div className="flex justify-between text-[11px] mb-1">
+                              <span className="text-white/60">Acoustic Threat Confidence:</span>
+                              <span className="font-mono font-bold text-cyan-300">{audioConfPercent}%</span>
+                            </div>
+                            <div className="h-1.5 w-full bg-white/10 rounded-full overflow-hidden">
+                              <div
+                                className="h-full bg-gradient-to-r from-cyan-400 to-lime-400 rounded-full"
+                                style={{ width: `${Math.min(100, Math.max(0, audioConfPercent))}%` }}
+                              />
+                            </div>
+                          </div>
+                        )}
+
+                        {audioDiag.transcription && audioDiag.transcription !== "None" && (
+                          <div className="p-2 rounded-lg bg-black/40 border border-white/5">
+                            <span className="text-[10px] uppercase font-bold text-cyan-400">Phonetic Transcription:</span>
+                            <p className="text-white/90 italic mt-0.5 font-mono text-[11px]">
+                              "{audioDiag.transcription}"
+                            </p>
+                          </div>
+                        )}
+
+                        {audioDiag.acoustic_reasoning && (
+                          <div className="p-2 rounded-lg bg-black/30 border border-white/5">
+                            <span className="text-[10px] uppercase font-bold text-white/50">Acoustic Diagnostics:</span>
+                            <p className="text-white/80 mt-0.5 text-[11px] leading-relaxed">
+                              {audioDiag.acoustic_reasoning}
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="mt-3 text-xs text-white/50">
+                        Synthetic or baseline telemetry reading. Decibel: {activeInspectTrigger.decibel_level || 0} dB.
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* ── Optical Forensic Panel ── */}
+                <div
+                  className="rounded-xl p-3.5 border flex flex-col justify-between"
+                  style={{
+                    background: "rgba(168, 85, 247, 0.04)",
+                    borderColor: "rgba(168, 85, 247, 0.25)",
+                  }}
+                >
+                  <div>
+                    <div className="flex items-center justify-between pb-2 border-b border-white/5">
+                      <div className="flex items-center gap-2">
+                        <Camera size={15} className="text-purple-400" />
+                        <span className="text-xs font-black uppercase tracking-wider text-purple-300">
+                          Optical Surveillance Forensics
+                        </span>
+                      </div>
+                      {hasImage && (
+                        <button
+                          onClick={() => setEnlargedImage(getAssetUrl(activeInspectTrigger.image_snapshot_url))}
+                          className="flex items-center gap-1 text-[10px] text-purple-400 hover:text-purple-300 transition"
+                        >
+                          <Maximize2 size={11} /> Expand Photo
+                        </button>
+                      )}
+                    </div>
+
+                    {hasImage ? (
+                      <div className="mt-3 flex items-center gap-3">
+                        <div
+                          onClick={() => setEnlargedImage(getAssetUrl(activeInspectTrigger.image_snapshot_url))}
+                          className="relative group h-24 w-36 shrink-0 rounded-xl overflow-hidden border border-white/10 cursor-pointer bg-black"
+                        >
+                          <img
+                            src={getAssetUrl(activeInspectTrigger.image_snapshot_url)}
+                            alt="Forensic Snapshot"
+                            className="h-full w-full object-cover group-hover:scale-105 transition duration-300"
+                          />
+                          <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition">
+                            <Maximize2 size={18} className="text-white" />
+                          </div>
+                        </div>
+
+                        <div className="flex flex-col gap-1 text-xs">
+                          <span className="font-bold text-white flex items-center gap-1.5">
+                            <ImageIcon size={13} className="text-purple-400" /> Camera Snapshot Captured
+                          </span>
+                          <span className="text-[11px] text-white/50 font-mono">
+                            Auto-escalated by acoustic threat trigger
+                          </span>
+                          <button
+                            onClick={() => setEnlargedImage(getAssetUrl(activeInspectTrigger.image_snapshot_url))}
+                            className="mt-1 self-start text-[11px] font-bold text-purple-300 hover:underline"
+                          >
+                            Click to view full image &rarr;
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="mt-3 p-3 rounded-lg bg-white/[0.02] border border-white/5 text-xs text-white/40 italic">
+                        {audioConfPercent && Number(audioConfPercent) < 80
+                          ? "Acoustic confidence below 80% escalation threshold. Optical sensor conserved battery."
+                          : "No camera snapshot attached to this trigger event."}
+                      </div>
+                    )}
+
+                    {visionDiag ? (
+                      <div className="mt-3 space-y-2 text-xs">
+                        {visionScorePercent && (
+                          <div>
+                            <div className="flex justify-between text-[11px] mb-1">
+                              <span className="text-white/60">Vision Threat Score:</span>
+                              <span className="font-mono font-bold text-purple-300">{visionScorePercent}%</span>
+                            </div>
+                            <div className="h-1.5 w-full bg-white/10 rounded-full overflow-hidden">
+                              <div
+                                className="h-full bg-gradient-to-r from-purple-400 to-red-400 rounded-full"
+                                style={{ width: `${Math.min(100, Math.max(0, visionScorePercent))}%` }}
+                              />
+                            </div>
+                          </div>
+                        )}
+
+                        {visionDiag.detected_objects && visionDiag.detected_objects.length > 0 && (
+                          <div>
+                            <span className="text-[10px] uppercase font-bold text-purple-400">Target Detections:</span>
+                            <div className="flex flex-wrap gap-1.5 mt-1">
+                              {visionDiag.detected_objects.map((obj, idx) => (
+                                <span
+                                  key={idx}
+                                  className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-purple-500/20 text-purple-200 border border-purple-500/30"
+                                >
+                                  {obj}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {visionDiag.reasoning && (
+                          <div className="p-2 rounded-lg bg-black/30 border border-white/5">
+                            <span className="text-[10px] uppercase font-bold text-white/50">Visual Evidence Reasoning:</span>
+                            <p className="text-white/80 mt-0.5 text-[11px] leading-relaxed">
+                              {visionDiag.reasoning}
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
               </div>
+
+              {/* Forensic Details Summary */}
+              {activeInspectTrigger.details && (
+                <div className="p-2.5 rounded-xl bg-black/30 border border-white/5 text-xs text-white/70">
+                  <span className="font-bold text-white/90">Forensic Overview: </span>
+                  {activeInspectTrigger.details}
+                </div>
+              )}
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* ── CHRONOLOGICAL TRIGGER HISTORY FEED ── */}
         <div className="px-6 pb-6">
@@ -956,7 +1271,27 @@ export const NodeMemoryModal = ({ node, onClose, onTriggerLogged, toast }) => {
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-3 shrink-0 font-mono text-[11px] text-white/60">
+                    <div className="flex items-center gap-2 shrink-0 font-mono text-[11px] text-white/60">
+                      {trig.audio_sample_url && (
+                        <span className="px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-300 text-[10px] flex items-center gap-1">
+                          🎙️ WAV
+                        </span>
+                      )}
+                      {trig.image_snapshot_url && (
+                        <span className="px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-300 text-[10px] flex items-center gap-1">
+                          📸 Photo
+                        </span>
+                      )}
+                      {(trig.audio_ai_analysis || trig.vision_ai_analysis) && (
+                        <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px] flex items-center gap-1">
+                          🤖 AI
+                        </span>
+                      )}
+                      {trig.is_manual && (
+                        <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[10px]">
+                          ⚙️ Manual
+                        </span>
+                      )}
                       {trig.decibel_level && (
                         <span className="text-lime-400">{trig.decibel_level} dB</span>
                       )}
@@ -970,6 +1305,45 @@ export const NodeMemoryModal = ({ node, onClose, onTriggerLogged, toast }) => {
               })}
           </div>
         </div>
+
+        {/* ── ENLARGED IMAGE MODAL ── */}
+        {enlargedImage && (
+          <div
+            className="fixed inset-0 z-[1300] flex items-center justify-center p-4 bg-black/90 backdrop-blur-md animate-fadeIn"
+            onClick={() => setEnlargedImage(null)}
+          >
+            <div
+              className="relative max-w-4xl max-h-[90vh] rounded-2xl overflow-hidden border border-white/20 shadow-2xl bg-black"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <img
+                src={enlargedImage}
+                alt="Enlarged Forensic Snapshot"
+                className="w-full h-auto max-h-[80vh] object-contain"
+              />
+              <div className="p-3 bg-black/80 flex items-center justify-between border-t border-white/10">
+                <span className="text-xs text-white/70 font-mono">ESP32-CAM High-Res Optical Snapshot</span>
+                <div className="flex items-center gap-2">
+                  <a
+                    href={enlargedImage}
+                    download
+                    target="_blank"
+                    rel="noreferrer"
+                    className="px-3 py-1.5 rounded-lg bg-lime-400 hover:bg-lime-300 text-black text-xs font-black transition flex items-center gap-1"
+                  >
+                    <ExternalLink size={12} /> Download Photo
+                  </a>
+                  <button
+                    onClick={() => setEnlargedImage(null)}
+                    className="p-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-white transition"
+                  >
+                    <X size={15} />
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

@@ -27,3 +27,6 @@ ALERT_CONFIDENCE_THRESHOLD = float(os.getenv("ALERT_CONFIDENCE_THRESHOLD", "0.80
 
 # Default primary node for College Garden
 DEFAULT_NODE_UID = os.getenv("DEFAULT_NODE_UID", "DGN-NODE-67SF-608")
+
+# OpenAI API Key for Multi-Modal AI Agents (Audio & Vision)
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or os.getenv("API", "").strip()

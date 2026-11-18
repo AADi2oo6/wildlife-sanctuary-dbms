@@ -22,11 +22,12 @@ class SerialNodeListener:
     buffers raw hardware diagnostic logs, and auto-reconnects if unplugged.
     """
 
-    def __init__(self, node_id: int, port: str, baud_rate: int = 115200, on_audio_received: Optional[Callable] = None):
+    def __init__(self, node_id: int, port: str, baud_rate: int = 115200, on_audio_received: Optional[Callable] = None, main_loop: Optional[asyncio.AbstractEventLoop] = None):
         self.node_id = node_id
         self.port = port
         self.baud_rate = baud_rate
         self.on_audio_received = on_audio_received
+        self.main_loop = main_loop
 
         self.ser: Optional[serial.Serial] = None
         self.is_running = False
@@ -166,7 +167,19 @@ class SerialNodeListener:
                     continue
 
                 # Prominent logging of ESP32 sensor notifications & vibration events
-                if any(k in line for k in ["EVENT", "TRIGGER", "VIBRATION", "vibration", "strike", "ERROR", "FATAL", "ACK"]):
+                if any(k in line for k in ["PHYSICAL VIBRATION STRIKE", "VIBRATION_ACTIVE_INTERRUPT"]):
+                    logger.info(f"💥 [ESP32 Node #{self.node_id}] PHYSICAL STRIKE CONFIRMED OVER SERIAL!")
+                    if self.main_loop and self.main_loop.is_running():
+                        from services.websocket_manager import manager
+                        asyncio.run_coroutine_threadsafe(
+                            manager.broadcast({
+                                "event": "physical_vibration_strike",
+                                "node_id": self.node_id,
+                                "message": f"Physical vibration strike detected on Node #{self.node_id}!"
+                            }),
+                            self.main_loop
+                        )
+                elif any(k in line for k in ["EVENT", "TRIGGER", "VIBRATION", "vibration", "strike", "ERROR", "FATAL", "ACK"]):
                     logger.info(f"💥 [ESP32 Node #{self.node_id} on {self.port}] {line}")
                 elif any(k in line for k in ["HEARTBEAT", "SENSOR", "STATUS", "PONG"]):
                     logger.info(f"💓 [ESP32 Node #{self.node_id} on {self.port}] {line}")
@@ -292,7 +305,8 @@ class SerialBridgeManager:
             node_id=node_id,
             port=port,
             baud_rate=baud_rate,
-            on_audio_received=self._on_audio_dispatched
+            on_audio_received=self._on_audio_dispatched,
+            main_loop=self._main_loop
         )
         success = listener.start()
         if success:

@@ -75,12 +75,14 @@ async def process_incoming_audio_event(payload: Dict[str, Any]):
         return
 
     # Broadcast processing status so UI button transitions to "Generating AI Report & Memory..."
-    await manager.broadcast({
-        "event": "vibration_strike_processing",
-        "node_id": node_id,
-        "trigger_source": trigger_source,
-        "message": f"Strike detected on Node #{node_id}! Audio acquired, generating AI report..."
-    })
+    # Only broadcast for physical hardware triggers, NOT client-uploaded laptop mic acquisitions
+    if trigger_source != "LAPTOP_MIC_ACQUISITION":
+        await manager.broadcast({
+            "event": "vibration_strike_processing",
+            "node_id": node_id,
+            "trigger_source": trigger_source,
+            "message": f"Strike detected on Node #{node_id}! Audio acquired, generating AI report..."
+        })
 
     node_name = node.get("name", f"Node #{node_id}")
     camera_url = node.get("camera_url")
@@ -107,16 +109,10 @@ async def process_incoming_audio_event(payload: Dict[str, Any]):
     image_snapshot_url: Optional[str] = None
     vision_score: Optional[float] = None
 
-    if escalate_to_camera or is_manual or trigger_source == "LAPTOP_MIC_ACQUISITION":
-        if payload.get("image_file_path") and os.path.exists(payload["image_file_path"]):
-            image_snapshot_url = payload.get("image_snapshot_url")
-            image_file_path = payload.get("image_file_path")
-            logger.info(f"👁️ [Tier 3 Vision Agent] Submitting provided frame {image_file_path} to GPT-4o-mini Vision...")
-            context_str = f"Acoustic AI detected {acoustic_threat_type} ({acoustic_conf}% confidence) at {measured_db} dB SPL."
-            vision_diag = await vision_ai_agent.analyze_image(image_file_path, context=context_str)
-            vision_score = vision_diag.get("vision_score", 0.0) / 100.0
-        elif camera_url:
-            logger.info(f"📷 [Tier 3 Escalation Gate Passed] Triggering optical camera snapshot at {camera_url}...")
+    # Condition: ONLY trigger camera if Acoustic AI detected a threat (or manual with image)
+    if threat_detected or escalate_to_camera or (is_manual and payload.get("image_file_path")):
+        if camera_url:
+            logger.info(f"📷 [Tier 3 Escalation Gate Passed] Acoustic threat detected! Triggering optical camera snapshot at {camera_url}...")
             snapshot_result = await CameraClient.capture_snapshot(camera_url, node_id=node_id)
 
             if snapshot_result and snapshot_result.get("success"):
@@ -129,8 +125,17 @@ async def process_incoming_audio_event(payload: Dict[str, Any]):
                 vision_score = vision_diag.get("vision_score", 0.0) / 100.0
             else:
                 logger.warning(f"⚠️ [Tier 3] Camera snapshot could not be retrieved from {camera_url}.")
+        elif payload.get("image_file_path") and os.path.exists(payload["image_file_path"]):
+            image_snapshot_url = payload.get("image_snapshot_url")
+            image_file_path = payload.get("image_file_path")
+            logger.info(f"👁️ [Tier 3 Vision Agent] Submitting provided frame {image_file_path} to GPT-4o-mini Vision...")
+            context_str = f"Acoustic AI detected {acoustic_threat_type} ({acoustic_conf}% confidence) at {measured_db} dB SPL."
+            vision_diag = await vision_ai_agent.analyze_image(image_file_path, context=context_str)
+            vision_score = vision_diag.get("vision_score", 0.0) / 100.0
         else:
             logger.info(f"ℹ️ [Tier 3] No camera_url configured on Node #{node_id}. Skipping optical acquisition.")
+    else:
+        logger.info(f"🌿 [Tier 3 Skipped] No acoustic threat detected ({acoustic_threat_type}). Skipping camera capture.")
 
     # ── SYNTHESIZE COMPOUND THREAT SEVERITY ─────────────────────────────────
     visual_threat = vision_diag.get("visual_threat", False) if vision_diag else False
@@ -258,6 +263,8 @@ async def process_incoming_audio_event(payload: Dict[str, Any]):
         f"🚀 [Pipeline Finished] Event {'#' + str(event_id) if event_id else '(throttled)'} processed! "
         f"Severity={severity} | PrimaryThreat={primary_threat_type}"
     )
+
+    return broadcast_data
 
 def init_event_pipeline():
     """

@@ -543,7 +543,7 @@ const IotMapTab = ({ toast }) => {
   // Floating Live Progress HUD state
   const [hudVisible, setHudVisible] = useState(false);
   const [hudStage, setHudStage] = useState("idle"); // 'idle' | 'listening_vibration' | 'recording_audio' | 'capturing_image' | 'analyzing_ai' | 'completed' | 'error'
-  const [hudCountdown, setHudCountdown] = useState(5);
+  const [hudCountdown, setHudCountdown] = useState(7);
   const [hudNode, setHudNode] = useState(null);
   const [hudResult, setHudResult] = useState(null);
   const [hudError, setHudError] = useState(null);
@@ -562,7 +562,7 @@ const IotMapTab = ({ toast }) => {
     setHudNode(node);
     setHudVisible(true);
     setHudStage("recording_audio");
-    setVibeStage("generating_report");
+    setVibeStage("recording");
     setHudCountdown(5);
 
     try {
@@ -572,30 +572,36 @@ const IotMapTab = ({ toast }) => {
         setHudCountdown(sec);
       });
 
-      // 2. Capture frame from webcam for optical verification
-      setHudStage("capturing_image");
-      toast?.("📸 Capturing camera frame for visual verification...", "info");
-      let imageBlob = null;
-      try {
-        imageBlob = await captureLaptopWebcamSnapshot();
-      } catch (camErr) {
-        console.warn("Webcam grab notice:", camErr);
-      }
-
-      // 3. Upload to FastAPI AI pipeline for Whisper + GPT-4o-mini + Vision AI
+      // 2. Submit to FastAPI AI pipeline for Whisper + GPT-4o-mini Acoustic Analysis
       setHudStage("analyzing_ai");
-      toast?.("🧠 Analyzing audio (Whisper) & vision (GPT-4o) with AI agents...", "info");
+      setVibeStage("generating_report");
+      toast?.("🧠 Analyzing audio with AI agents (Whisper + GPT-4o-mini)...", "info");
 
-      const res = await uploadLaptopAudio(node.node_id, audioBlob, imageBlob);
+      // Pass only audioBlob; IoT camera is triggered server-side IF threat detected
+      const res = await uploadLaptopAudio(node.node_id, audioBlob, null);
+      const pipelineData = res.result || res;
+
+      const isThreat = Boolean(
+        pipelineData.is_anomaly ||
+        pipelineData.severity === "ALERT" ||
+        pipelineData.audio_ai_analysis?.threat_detected ||
+        pipelineData.vision_ai_analysis?.visual_threat
+      );
+
+      if (isThreat) {
+        toast?.("🚨 Acoustic threat detected! Triggering IoT camera verification...", "warning");
+      } else {
+        toast?.("✅ No threat detected (Normal Ambient). Acoustic report generated.", "success");
+      }
 
       setHudStage("completed");
       setHudResult((prev) => ({
         ...prev,
-        ...res,
+        ...pipelineData,
         node_name: node.name,
         device_uid: node.device_uid,
       }));
-      toast?.("✅ Threat analysis completed! Result ready.", "success");
+
       loadData(true);
     } catch (err) {
       console.error("Workflow execution error:", err);
@@ -603,13 +609,14 @@ const IotMapTab = ({ toast }) => {
       setHudError(err.message || "Failed to record audio or execute AI diagnosis.");
       toast?.("Sensor workflow error: " + (err.message || "Error"), "error");
     } finally {
+      // Stop and wait for the NEXT click on the listen button (NO LOOPING!)
       isExecutingWorkflowRef.current = false;
       setListeningVibeNodeId(null);
       setVibeStage("idle");
     }
   };
 
-  // Start the vibration listening workflow with 5-second auto-trigger
+  // Start the vibration listening workflow with 7-second auto-trigger window
   const handleStartVibrationWorkflow = async (node) => {
     if (!node?.node_id || isExecutingWorkflowRef.current) return;
 
@@ -618,13 +625,13 @@ const IotMapTab = ({ toast }) => {
     setVibeStage("armed_waiting");
     setHudNode(node);
     setHudStage("listening_vibration");
-    setHudCountdown(5);
+    setHudCountdown(7);
     setHudVisible(true);
     setHudCollapsed(false);
     setHudResult(null);
     setHudError(null);
 
-    toast?.(`🎧 Node #${node.node_id} listening for vibration... Strike sensor or auto-triggers in 5s.`, "info");
+    toast?.(`🎧 Node #${node.node_id} listening for vibration... Strike sensor or auto-triggers in 7s.`, "info");
 
     // Send single-shot arm command to ESP32 over serial if connected
     try {
@@ -637,7 +644,7 @@ const IotMapTab = ({ toast }) => {
       clearInterval(vibrationTimeoutRef.current);
     }
 
-    let count = 5;
+    let count = 7;
     vibrationTimeoutRef.current = setInterval(() => {
       count -= 1;
       setHudCountdown(count);
@@ -645,8 +652,8 @@ const IotMapTab = ({ toast }) => {
       if (count <= 0) {
         clearInterval(vibrationTimeoutRef.current);
         vibrationTimeoutRef.current = null;
-        toast?.("⚡ Vibration auto-triggered! Recording started...", "info");
-        executeRecordingAndAnalysis(node, "5s Auto-Trigger");
+        toast?.("⚡ 7s elapsed — Vibration auto-triggered! Recording started...", "info");
+        executeRecordingAndAnalysis(node, "7s Auto-Trigger Timeout");
       }
     }, 1000);
   };
@@ -1058,20 +1065,22 @@ const IotMapTab = ({ toast }) => {
               return;
             }
 
-            if (data.event === "vibration_strike_processing") {
-              setListeningVibeNodeId(data.node_id);
-              setVibeStage("generating_report");
-              if (vibrationTimeoutRef.current) {
-                clearInterval(vibrationTimeoutRef.current);
-                vibrationTimeoutRef.current = null;
+            if (data.event === "physical_vibration_strike" || data.event === "vibration_strike_processing") {
+              // ONLY execute if user explicitly clicked "Listen for Vibration" AND is actively waiting in the 7s window!
+              if (isExecutingWorkflowRef.current && hudStage === "listening_vibration") {
+                if (vibrationTimeoutRef.current) {
+                  clearInterval(vibrationTimeoutRef.current);
+                  vibrationTimeoutRef.current = null;
+                }
+                toast?.("💥 Physical vibration detected from IoT device! Starting 5s laptop mic recording...", "info");
+                
+                setNodes((latest) => {
+                  const nodeMatch = latest.find((n) => n.node_id === data.node_id) || hudNode || selectedNode || { node_id: data.node_id, name: `Node #${data.node_id}` };
+                  executeRecordingAndAnalysis(nodeMatch, "Physical SW-420 Sensor Strike");
+                  return latest;
+                });
               }
-              toast?.("💥 Physical vibration strike detected! Starting laptop mic audio recording...", "info");
-              
-              setNodes((latest) => {
-                const nodeMatch = latest.find((n) => n.node_id === data.node_id) || { node_id: data.node_id, name: `Node #${data.node_id}` };
-                executeRecordingAndAnalysis(nodeMatch, "Physical SW-420 Sensor Strike");
-                return latest;
-              });
+              // If not actively listening (e.g. idle, already recording, analyzing, or completed), completely ignore! Never loop!
               return;
             }
 
@@ -1080,13 +1089,6 @@ const IotMapTab = ({ toast }) => {
               setListeningVibeNodeId(null);
               isExecutingWorkflowRef.current = false;
               loadData(true);
-              setNodes((latest) => {
-                const nodeMatch = latest.find((n) => n.node_id === data.node_id);
-                if (nodeMatch) {
-                  handleOpenNodeMemory(nodeMatch);
-                }
-                return latest;
-              });
               return;
             }
 
@@ -3641,12 +3643,12 @@ const IotMapTab = ({ toast }) => {
                     </span>
                   </div>
                   <p className="text-[11px] text-white/70 leading-relaxed">
-                    Strike the physical SW-420 sensor to trigger immediately, or recording starts automatically when the timer reaches zero.
+                    Strike the physical SW-420 sensor to trigger immediately, or recording starts automatically after 7s window.
                   </p>
                   <div className="w-full bg-white/10 rounded-full h-1.5 overflow-hidden">
                     <div
                       className="bg-amber-400 h-1.5 rounded-full transition-all duration-1000 ease-linear"
-                      style={{ width: `${(hudCountdown / 5) * 100}%` }}
+                      style={{ width: `${(hudCountdown / 7) * 100}%` }}
                     />
                   </div>
                 </div>

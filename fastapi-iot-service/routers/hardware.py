@@ -358,14 +358,15 @@ async def upload_audio_acquisition(
     }
 
     logger.info(f"🎤 [UploadAudio] Received {len(audio_bytes)} bytes audio from laptop mic for Node #{node_id}.")
-    await process_incoming_audio_event(payload)
+    pipeline_res = await process_incoming_audio_event(payload)
 
     return {
         "status": "success",
         "message": "Audio processed through AI pipeline successfully.",
         "node_id": node_id,
-        "audio_url": relative_audio_url,
-        "image_url": relative_img_url,
+        "audio_url": pipeline_res.get("audio_sample_url") if pipeline_res else relative_audio_url,
+        "image_url": pipeline_res.get("image_snapshot_url") if pipeline_res else relative_img_url,
+        "result": pipeline_res,
         "timestamp": ts
     }
 
@@ -621,6 +622,19 @@ async def clear_all_data():
         "message": "All previous telemetry, audio recordings, snapshot images, and alerts cleared successfully.",
         "cleared_files": cleared_files,
         "db": db_result
+    }
+
+@router.delete("/triggers/{event_id}")
+async def delete_trigger_event_endpoint(event_id: int):
+    """
+    Delete a single unwanted trigger event by ID.
+    """
+    from database import delete_trigger_event
+    success = await delete_trigger_event(event_id)
+    return {
+        "status": "success" if success else "not_found",
+        "event_id": event_id,
+        "deleted": success
     }
 
 

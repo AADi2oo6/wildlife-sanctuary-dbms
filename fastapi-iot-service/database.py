@@ -156,6 +156,13 @@ async def clear_all_iot_history() -> Dict[str, Any]:
                 "status": "success"
             }
 
+async def delete_trigger_event(event_id: int) -> bool:
+    """Deletes a single trigger event record by event_id."""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        res = await conn.execute("DELETE FROM iot_trigger_events WHERE event_id = $1", event_id)
+        return "DELETE 1" in res
+
 async def update_node_status(
     node_id: int, 
     status: Optional[str] = None, 

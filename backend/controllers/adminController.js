@@ -950,5 +950,28 @@ export const createNodeTrigger = async (req, res) => {
   }
 };
 
+/** DELETE /api/admin/iot-nodes/:id/triggers/:triggerId — delete an unwanted trigger event from memory */
+export const deleteNodeTrigger = async (req, res) => {
+  try {
+    const triggerId = parseInt(req.params.triggerId, 10);
+    if (isNaN(triggerId)) {
+      return res.status(400).json({ success: false, error: 'Invalid trigger ID.' });
+    }
+
+    await prisma.iotTriggerEvent.delete({
+      where: { event_id: triggerId },
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Trigger event deleted from memory successfully.',
+      event_id: triggerId,
+    });
+  } catch (error) {
+    console.error('🔥 Admin – Delete Node Trigger Error:', error);
+    return res.status(500).json({ success: false, error: 'Failed to delete trigger event.' });
+  }
+};
+
 
 

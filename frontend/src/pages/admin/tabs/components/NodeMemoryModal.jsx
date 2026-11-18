@@ -30,6 +30,7 @@ import {
   Image as ImageIcon,
   CheckCircle2,
   ChevronRight,
+  Trash2,
 } from "lucide-react";
 import { Badge } from "../../shared/adminComponents";
 import api from "../../../../api/axiosInstance";
@@ -141,6 +142,29 @@ export const NodeMemoryModal = ({ node, onClose, onTriggerLogged, toast }) => {
       toast.success(msg);
     } else if (typeof toast === "function") {
       toast(msg, type);
+    }
+  };
+
+  const [deletingId, setDeletingId] = useState(null);
+
+  const handleDeleteTrigger = async (e, eventId) => {
+    e.stopPropagation();
+    if (!window.confirm("⚠️ Are you sure you want to delete this trigger event from memory?")) {
+      return;
+    }
+    setDeletingId(eventId);
+    try {
+      await api.delete(`/admin/iot-nodes/${node.node_id}/triggers/${eventId}`);
+      setTriggers((prev) => prev.filter((t) => t.event_id !== eventId));
+      if (selectedTrigger?.event_id === eventId) {
+        setSelectedTrigger(null);
+      }
+      notify("🗑️ Trigger event deleted from memory.", "success");
+      if (onTriggerLogged) onTriggerLogged();
+    } catch (err) {
+      notify("Failed to delete trigger: " + (err.response?.data?.error || err.message), "error");
+    } finally {
+      setDeletingId(null);
     }
   };
 
@@ -966,6 +990,17 @@ export const NodeMemoryModal = ({ node, onClose, onTriggerLogged, toast }) => {
                       </p>
                     </div>
                   )}
+
+                  <button
+                    type="button"
+                    onClick={(e) => handleDeleteTrigger(e, activeInspectTrigger.event_id)}
+                    disabled={deletingId === activeInspectTrigger.event_id}
+                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-300 border border-red-500/30 text-xs font-bold transition ml-2"
+                    title="Delete this trigger event from memory"
+                  >
+                    <Trash2 size={13} className={deletingId === activeInspectTrigger.event_id ? "animate-spin" : ""} />
+                    <span>Delete</span>
+                  </button>
                 </div>
               </div>
 
@@ -1299,6 +1334,15 @@ export const NodeMemoryModal = ({ node, onClose, onTriggerLogged, toast }) => {
                         {new Date(trig.triggered_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                       </span>
                       <Badge label={trig.severity} color={trigColor} />
+                      <button
+                        type="button"
+                        onClick={(e) => handleDeleteTrigger(e, trig.event_id)}
+                        disabled={deletingId === trig.event_id}
+                        className="p-1 rounded-lg text-white/30 hover:text-red-400 hover:bg-red-500/20 transition shrink-0 ml-0.5"
+                        title="Delete this trigger event from memory"
+                      >
+                        <Trash2 size={13} className={deletingId === trig.event_id ? "animate-spin text-red-400" : ""} />
+                      </button>
                     </div>
                   </div>
                 );

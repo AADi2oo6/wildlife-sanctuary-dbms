@@ -33,6 +33,7 @@ import {
   deleteCustomArea,
   getNodeTriggers,
   createNodeTrigger,
+  deleteNodeTrigger,
 } from '../controllers/adminController.js';
 
 const router = Router();
@@ -92,6 +93,7 @@ router.patch('/iot-nodes/:id',            updateIotNode);
 router.delete('/iot-nodes/:id',           deleteIotNode);
 router.get('/iot-nodes/:id/triggers',     getNodeTriggers);
 router.post('/iot-nodes/:id/triggers',    createNodeTrigger);
+router.delete('/iot-nodes/:id/triggers/:triggerId', deleteNodeTrigger);
 
 // Custom Forest & Sanctuary Areas
 router.get('/custom-areas',         getAllCustomAreas);

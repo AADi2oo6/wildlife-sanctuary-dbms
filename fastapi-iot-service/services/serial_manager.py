@@ -335,5 +335,24 @@ class SerialBridgeManager:
             return False
         return listener.send_command("CMD:RECORD_5S")
 
+    def arm_vibration(self, node_id: int) -> bool:
+        """
+        Arm the SW-420 physical vibration sensor on the ESP32 node to listen for a single strike.
+        """
+        listener = self._listeners.get(node_id)
+        if not listener or not listener.is_running:
+            logger.warning(f"[SerialBridgeManager] Cannot arm vibration: Node #{node_id} is not connected on serial.")
+            return False
+        return listener.send_command("CMD:ARM_VIBRATION")
+
+    def disarm_vibration(self, node_id: int) -> bool:
+        """
+        Disarm the vibration sensor back to standby.
+        """
+        listener = self._listeners.get(node_id)
+        if not listener or not listener.is_running:
+            return False
+        return listener.send_command("CMD:DISARM_VIBRATION")
+
 # Singleton instance
 serial_bridge = SerialBridgeManager()

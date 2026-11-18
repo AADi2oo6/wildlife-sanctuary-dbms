@@ -64,7 +64,7 @@ class AudioAIAgent:
 
         # Fast-Path Filter: If sound pressure is low ambient (< 54 dB SPL), it cannot be a gunshot, chainsaw,
         # or heavy vehicle. Return immediately in < 1ms to prevent OpenAI latency & DB flooding.
-        if calculated_db < 54.0 and trigger_source != "OPERATOR_MANUAL_COMMAND":
+        if calculated_db < 54.0 and trigger_source not in ("OPERATOR_MANUAL_COMMAND", "LAPTOP_MIC_ACQUISITION"):
             logger.info(f"🌿 [AudioAIAgent] Low acoustic energy ({calculated_db} dB SPL). Fast-path classified as NORMAL_AMBIENT.")
             return {
                 "threat_detected": False,

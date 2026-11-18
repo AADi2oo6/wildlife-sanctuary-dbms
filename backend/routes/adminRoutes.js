@@ -26,6 +26,8 @@ import {
   createIotNode,
   updateIotNode,
   deleteIotNode,
+  setPrimaryNode,
+  clearAllIotData,
   getAllCustomAreas,
   createCustomArea,
   deleteCustomArea,
@@ -84,6 +86,8 @@ router.delete('/contact/:id',       deleteContactMessage);
 // IoT Nodes & Memory
 router.get('/iot-nodes',                  getAllIotNodes);
 router.post('/iot-nodes',                 createIotNode);
+router.post('/iot-nodes/clear-all',        clearAllIotData);
+router.post('/iot-nodes/:id/primary',      setPrimaryNode);
 router.patch('/iot-nodes/:id',            updateIotNode);
 router.delete('/iot-nodes/:id',           deleteIotNode);
 router.get('/iot-nodes/:id/triggers',     getNodeTriggers);

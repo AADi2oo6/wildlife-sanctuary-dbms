@@ -2,6 +2,7 @@ import logging
 import asyncio
 import json
 import time
+import os
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
@@ -39,7 +40,7 @@ async def process_incoming_audio_event(payload: Dict[str, Any]):
     audio_sample_url = payload.get("audio_sample_url") or payload.get("relative_url")
     audio_file_path = payload.get("audio_file_path") or payload.get("file_path")
     trigger_source = payload.get("trigger_source", "VIBRATION_INTERRUPT")
-    is_manual = (trigger_source == "OPERATOR_MANUAL_COMMAND")
+    is_manual = (trigger_source in ("OPERATOR_MANUAL_COMMAND", "LAPTOP_MIC_ACQUISITION"))
 
     now = time.time()
     last_time = _last_node_trigger_time.get(node_id, 0.0)
@@ -63,8 +64,23 @@ async def process_incoming_audio_event(payload: Dict[str, Any]):
 
     node = await get_node_by_identifier(str(node_id))
     if not node:
+        from database import get_primary_node
+        node = await get_primary_node()
+        if node:
+            node_id = node["node_id"]
+            device_uid = node["device_uid"]
+
+    if not node:
         logger.error(f"[Pipeline] Node #{node_id} not found in database.")
         return
+
+    # Broadcast processing status so UI button transitions to "Generating AI Report & Memory..."
+    await manager.broadcast({
+        "event": "vibration_strike_processing",
+        "node_id": node_id,
+        "trigger_source": trigger_source,
+        "message": f"Strike detected on Node #{node_id}! Audio acquired, generating AI report..."
+    })
 
     node_name = node.get("name", f"Node #{node_id}")
     camera_url = node.get("camera_url")
@@ -91,8 +107,15 @@ async def process_incoming_audio_event(payload: Dict[str, Any]):
     image_snapshot_url: Optional[str] = None
     vision_score: Optional[float] = None
 
-    if escalate_to_camera or is_manual:
-        if camera_url:
+    if escalate_to_camera or is_manual or trigger_source == "LAPTOP_MIC_ACQUISITION":
+        if payload.get("image_file_path") and os.path.exists(payload["image_file_path"]):
+            image_snapshot_url = payload.get("image_snapshot_url")
+            image_file_path = payload.get("image_file_path")
+            logger.info(f"👁️ [Tier 3 Vision Agent] Submitting provided frame {image_file_path} to GPT-4o-mini Vision...")
+            context_str = f"Acoustic AI detected {acoustic_threat_type} ({acoustic_conf}% confidence) at {measured_db} dB SPL."
+            vision_diag = await vision_ai_agent.analyze_image(image_file_path, context=context_str)
+            vision_score = vision_diag.get("vision_score", 0.0) / 100.0
+        elif camera_url:
             logger.info(f"📷 [Tier 3 Escalation Gate Passed] Triggering optical camera snapshot at {camera_url}...")
             snapshot_result = await CameraClient.capture_snapshot(camera_url, node_id=node_id)
 
@@ -168,13 +191,21 @@ async def process_incoming_audio_event(payload: Dict[str, Any]):
         )
         event_id = created_event.get("event_id")
 
-    # Update Node status if Alert
+    # Update Node status if Alert (propagate alert across all sanctuary nodes)
     new_node_status = "ALERT" if severity == "ALERT" else node.get("status", "ACTIVE")
-    await update_node_status(node_id=node_id, status=new_node_status)
+    if severity == "ALERT":
+        from database import set_all_nodes_alert
+        await set_all_nodes_alert()
+        logger.info("🚨 [Pipeline] Perimeter Threat Breach: Elevated ALL deployed nodes to ALERT status!")
+    else:
+        await update_node_status(node_id=node_id, status=new_node_status)
 
     # ── WEBSOCKET BROADCAST TO ADMIN DASHBOARD ─────────────────────────────
     broadcast_data = {
         "event": "telemetry_update",
+        "report_completed": True,
+        "trigger_source": trigger_source,
+        "all_nodes_alert": (severity == "ALERT"),
         "node_id": node_id,
         "device_uid": device_uid,
         "node_name": node_name,
@@ -195,6 +226,15 @@ async def process_incoming_audio_event(payload: Dict[str, Any]):
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
     await manager.broadcast(broadcast_data)
+    await manager.broadcast({
+        "event": "report_generation_complete",
+        "node_id": node_id,
+        "event_id": event_id,
+        "trigger_type": primary_threat_type,
+        "audio_sample_url": audio_sample_url,
+        "image_snapshot_url": image_snapshot_url,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    })
 
     # ── TELEGRAM CHATBOT INSTANT THREAT NOTIFICATION ───────────────────────
     # Broadcast alert directly to @DeepGreen_TheBot with audio AI analysis and camera snapshot

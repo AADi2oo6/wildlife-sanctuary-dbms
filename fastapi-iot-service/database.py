@@ -82,7 +82,7 @@ async def get_node_by_identifier(identifier: str) -> Optional[Dict[str, Any]]:
             """
             SELECT node_id, device_uid, name, latitude, longitude, status, 
                    battery_level, sensor_type, com_port, baud_rate, camera_url, 
-                   camera_stream_url, is_listening, notes, last_ping, zone_id, custom_area_id
+                   camera_stream_url, is_listening, is_primary, notes, last_ping, zone_id, custom_area_id
             FROM iot_nodes
             WHERE device_uid = $1 OR ($2::int IS NOT NULL AND node_id = $2::int)
             LIMIT 1
@@ -91,6 +91,70 @@ async def get_node_by_identifier(identifier: str) -> Optional[Dict[str, Any]]:
             node_id_int
         )
         return dict(row) if row else None
+
+async def get_primary_node() -> Optional[Dict[str, Any]]:
+    """Retrieves the node designated as primary, or the lowest node_id if none marked."""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT node_id, device_uid, name, latitude, longitude, status, 
+                   battery_level, sensor_type, com_port, baud_rate, camera_url, 
+                   camera_stream_url, is_listening, is_primary, notes, last_ping, zone_id, custom_area_id
+            FROM iot_nodes
+            WHERE is_primary = true
+            LIMIT 1
+            """
+        )
+        if not row:
+            row = await conn.fetchrow(
+                """
+                SELECT node_id, device_uid, name, latitude, longitude, status, 
+                       battery_level, sensor_type, com_port, baud_rate, camera_url, 
+                       camera_stream_url, is_listening, is_primary, notes, last_ping, zone_id, custom_area_id
+                FROM iot_nodes
+                ORDER BY node_id ASC
+                LIMIT 1
+                """
+            )
+        return dict(row) if row else None
+
+async def set_primary_node(node_id: int) -> Dict[str, Any]:
+    """Designates a single node as primary, unsetting primary on all other nodes."""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("UPDATE iot_nodes SET is_primary = false WHERE is_primary = true")
+            row = await conn.fetchrow(
+                """
+                UPDATE iot_nodes 
+                SET is_primary = true, is_listening = true, updated_at = NOW() 
+                WHERE node_id = $1 
+                RETURNING node_id, device_uid, name, com_port, baud_rate, is_primary, camera_url, camera_stream_url, is_listening
+                """,
+                node_id
+            )
+            return dict(row) if row else {}
+
+async def set_all_nodes_alert() -> int:
+    """Sets all deployed nodes to ALERT status across the sanctuary."""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute("UPDATE iot_nodes SET status = 'ALERT'::\"NodeStatus\", updated_at = NOW()")
+        return int(result.split()[-1]) if result else 0
+
+async def clear_all_iot_history() -> Dict[str, Any]:
+    """Deletes all trigger event telemetry, clears audio/image records, and resets all nodes to ACTIVE."""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            res_delete = await conn.execute("DELETE FROM iot_trigger_events")
+            res_reset = await conn.execute("UPDATE iot_nodes SET status = 'ACTIVE'::\"NodeStatus\", updated_at = NOW()")
+            return {
+                "events_deleted": res_delete,
+                "nodes_reset": res_reset,
+                "status": "success"
+            }
 
 async def update_node_status(
     node_id: int, 
@@ -160,7 +224,7 @@ async def update_node_hardware_config(
             UPDATE iot_nodes 
             SET {', '.join(updates)} 
             WHERE node_id = $1 
-            RETURNING node_id, device_uid, name, com_port, baud_rate, camera_url, camera_stream_url, is_listening
+            RETURNING node_id, device_uid, name, com_port, baud_rate, camera_url, camera_stream_url, is_listening, is_primary
         """
         row = await conn.fetchrow(query, *args)
         return dict(row) if row else {}

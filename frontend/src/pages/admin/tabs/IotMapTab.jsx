@@ -6,7 +6,8 @@ import {
   Layers, Globe, Shield, RefreshCw, X, AlertTriangle, CheckCircle, Crosshair,
   Navigation, LocateFixed, PenTool, Shapes, Undo2, Check, Info, Compass,
   History, Eye, Clock, AlertCircle, ChevronRight, Filter, Activity,
-  Camera, Video, Mic, Sun, Usb, Cable, Power, Play, Settings, Terminal, Cpu, Send
+  Camera, Video, Mic, Sun, Usb, Cable, Power, Play, Settings, Terminal, Cpu, Send, Star,
+  Volume2, Sparkles, ChevronDown, ChevronUp, CheckCheck, Loader2
 } from "lucide-react";
 import api from "../../../api/axiosInstance";
 import { Eyebrow, Badge, Modal, Inp, Sel, inputStyle, SubmitButton } from "../shared/adminComponents";
@@ -22,6 +23,10 @@ import {
   fetchNodeLogs,
   updateNodeHardwareConfig,
   triggerTelegramTestAlert,
+  setNodeAsPrimary,
+  clearAllIotHistory,
+  armNodeVibration,
+  uploadLaptopAudio,
 } from "../../../api/hardwareApi";
 
 // Fix Leaflet's default icon paths in bundled environments
@@ -85,6 +90,162 @@ export const calculatePerimeterKm = (coords) => {
     dist += RADIUS * c;
   }
   return parseFloat(dist.toFixed(2));
+};
+
+/**
+ * Encodes Float32Array PCM samples to a 16-bit Mono WAV Blob.
+ */
+export const encodePcmToWav = (samples, sampleRate = 16000) => {
+  const buffer = new ArrayBuffer(44 + samples.length * 2);
+  const view = new DataView(buffer);
+
+  const writeString = (offset, string) => {
+    for (let i = 0; i < string.length; i++) {
+      view.setUint8(offset + i, string.charCodeAt(i));
+    }
+  };
+
+  writeString(0, "RIFF");
+  view.setUint32(4, 36 + samples.length * 2, true);
+  writeString(8, "WAVE");
+  writeString(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, 1, true); // Mono
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true); // Byte rate
+  view.setUint16(32, 2, true); // Block align
+  view.setUint16(34, 16, true); // Bits per sample
+  writeString(36, "data");
+  view.setUint32(40, samples.length * 2, true);
+
+  let offset = 44;
+  for (let i = 0; i < samples.length; i++, offset += 2) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+
+  return new Blob([view], { type: "audio/wav" });
+};
+
+/**
+ * Records live audio directly from the operator's laptop microphone,
+ * downsamples to 16kHz, and outputs a standard WAV Blob for OpenAI Whisper.
+ */
+export const recordLaptopMicWav = (durationSeconds = 5, onTick) => {
+  return new Promise(async (resolve, reject) => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
+      const audioCtx = new AudioCtxClass();
+      const source = audioCtx.createMediaStreamSource(stream);
+      const sampleRate = audioCtx.sampleRate;
+
+      const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+      const pcmChunks = [];
+
+      processor.onaudioprocess = (e) => {
+        const inputBuffer = e.inputBuffer.getChannelData(0);
+        pcmChunks.push(new Float32Array(inputBuffer));
+      };
+
+      source.connect(processor);
+      processor.connect(audioCtx.destination);
+
+      let timeLeft = durationSeconds;
+      if (onTick) onTick(timeLeft);
+
+      const intervalId = setInterval(() => {
+        timeLeft -= 1;
+        if (onTick) onTick(Math.max(0, timeLeft));
+      }, 1000);
+
+      setTimeout(() => {
+        clearInterval(intervalId);
+        try {
+          processor.disconnect();
+          source.disconnect();
+          stream.getTracks().forEach((track) => track.stop());
+          audioCtx.close();
+
+          let totalLen = 0;
+          for (let i = 0; i < pcmChunks.length; i++) {
+            totalLen += pcmChunks[i].length;
+          }
+          const merged = new Float32Array(totalLen);
+          let off = 0;
+          for (let i = 0; i < pcmChunks.length; i++) {
+            merged.set(pcmChunks[i], off);
+            off += pcmChunks[i].length;
+          }
+
+          // Downsample to 16kHz for Whisper
+          const targetSampleRate = 16000;
+          let finalSamples = merged;
+          if (sampleRate !== targetSampleRate) {
+            const ratio = sampleRate / targetSampleRate;
+            const newLength = Math.round(merged.length / ratio);
+            const downsampled = new Float32Array(newLength);
+            for (let i = 0; i < newLength; i++) {
+              downsampled[i] = merged[Math.round(i * ratio)] || 0;
+            }
+            finalSamples = downsampled;
+          }
+
+          const wavBlob = encodePcmToWav(finalSamples, targetSampleRate);
+          resolve(wavBlob);
+        } catch (err) {
+          reject(err);
+        }
+      }, durationSeconds * 1000);
+    } catch (err) {
+      reject(err);
+    }
+  });
+};
+
+/**
+ * Captures a single JPEG snapshot frame from the laptop's webcam.
+ */
+export const captureLaptopWebcamSnapshot = async () => {
+  try {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      return null;
+    }
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 640 }, height: { ideal: 480 } },
+      audio: false,
+    });
+    const video = document.createElement("video");
+    video.srcObject = stream;
+    video.muted = true;
+    video.playsInline = true;
+    await video.play();
+
+    // 400ms settle time for camera auto-exposure
+    await new Promise((r) => setTimeout(r, 400));
+
+    const canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth || 640;
+    canvas.height = video.videoHeight || 480;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    stream.getTracks().forEach((track) => track.stop());
+
+    return new Promise((resolve) => {
+      canvas.toBlob(
+        (blob) => {
+          resolve(blob);
+        },
+        "image/jpeg",
+        0.85
+      );
+    });
+  } catch (err) {
+    console.warn("Laptop webcam capture fallback notice:", err?.message || err);
+    return null;
+  }
 };
 
 // Major preset forest & wildlife sanctuary polygons (India & Global)
@@ -231,7 +392,7 @@ const AREA_COLOR_PALETTE = [
   { name: "Red Core", hex: "#ef4444" },
 ];
 
-const createNodeIcon = (status, name) => {
+const createNodeIcon = (status, name, isPrimary = false) => {
   const color = NODE_STATUS_COLOR[status] || "#4ade80";
   const isAlert = status === "ALERT";
   const isOffline = status === "OFFLINE";
@@ -242,14 +403,18 @@ const createNodeIcon = (status, name) => {
     ? `<span class="absolute -inset-1 rounded-full animate-pulse opacity-40" style="background:${color}"></span>`
     : "";
 
+  const starHtml = isPrimary
+    ? `<span class="absolute -top-1.5 -right-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-amber-400 text-[9px] font-black text-black shadow-md border border-black/40">★</span>`
+    : "";
+
   return L.divIcon({
     className: "custom-iot-marker",
     html: `
       <div class="relative flex items-center justify-center cursor-pointer select-none group" style="width: 32px; height: 32px;">
         ${pulseHtml}
         <div class="relative flex items-center justify-center rounded-full shadow-lg transition-transform transform group-hover:scale-125"
-             style="width: 26px; height: 26px; background: rgba(13,26,15,0.92); border: 2px solid ${color}; box-shadow: 0 0 14px ${color}88;">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+             style="width: 26px; height: 26px; background: rgba(13,26,15,0.92); border: 2px solid ${isPrimary ? "#fbbf24" : color}; box-shadow: 0 0 14px ${color}88;">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="${isPrimary ? "#fbbf24" : color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"/>
             <path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"/>
             <circle cx="12" cy="12" r="2"/>
@@ -257,6 +422,7 @@ const createNodeIcon = (status, name) => {
             <path d="M19.1 4.9C23 8.8 23 15.2 19.1 19.1"/>
           </svg>
         </div>
+        ${starHtml}
       </div>
     `,
     iconSize: [32, 32],
@@ -366,6 +532,176 @@ const IotMapTab = ({ toast }) => {
       toast(err.response?.data?.detail || err.message || "Failed to toggle COM port.", "error");
     } finally {
       setTogglingCom(false);
+    }
+  };
+
+  const [clearingData, setClearingData] = useState(false);
+  const [settingPrimary, setSettingPrimary] = useState(false);
+  const [listeningVibeNodeId, setListeningVibeNodeId] = useState(null);
+  const [vibeStage, setVibeStage] = useState("idle"); // 'idle' | 'armed_waiting' | 'recording' | 'generating_report'
+
+  // Floating Live Progress HUD state
+  const [hudVisible, setHudVisible] = useState(false);
+  const [hudStage, setHudStage] = useState("idle"); // 'idle' | 'listening_vibration' | 'recording_audio' | 'capturing_image' | 'analyzing_ai' | 'completed' | 'error'
+  const [hudCountdown, setHudCountdown] = useState(5);
+  const [hudNode, setHudNode] = useState(null);
+  const [hudResult, setHudResult] = useState(null);
+  const [hudError, setHudError] = useState(null);
+  const [hudCollapsed, setHudCollapsed] = useState(false);
+
+  const vibrationTimeoutRef = useRef(null);
+  const isExecutingWorkflowRef = useRef(false);
+
+  // Executes the 5-second laptop microphone recording and optical camera capture
+  const executeRecordingAndAnalysis = async (node, triggerReason = "Sensor Strike") => {
+    if (vibrationTimeoutRef.current) {
+      clearInterval(vibrationTimeoutRef.current);
+      vibrationTimeoutRef.current = null;
+    }
+
+    setHudNode(node);
+    setHudVisible(true);
+    setHudStage("recording_audio");
+    setVibeStage("generating_report");
+    setHudCountdown(5);
+
+    try {
+      // 1. Record 5 seconds of clean audio directly from laptop mic
+      toast?.("🎙️ Recording 5s audio from laptop microphone...", "info");
+      const audioBlob = await recordLaptopMicWav(5, (sec) => {
+        setHudCountdown(sec);
+      });
+
+      // 2. Capture frame from webcam for optical verification
+      setHudStage("capturing_image");
+      toast?.("📸 Capturing camera frame for visual verification...", "info");
+      let imageBlob = null;
+      try {
+        imageBlob = await captureLaptopWebcamSnapshot();
+      } catch (camErr) {
+        console.warn("Webcam grab notice:", camErr);
+      }
+
+      // 3. Upload to FastAPI AI pipeline for Whisper + GPT-4o-mini + Vision AI
+      setHudStage("analyzing_ai");
+      toast?.("🧠 Analyzing audio (Whisper) & vision (GPT-4o) with AI agents...", "info");
+
+      const res = await uploadLaptopAudio(node.node_id, audioBlob, imageBlob);
+
+      setHudStage("completed");
+      setHudResult((prev) => ({
+        ...prev,
+        ...res,
+        node_name: node.name,
+        device_uid: node.device_uid,
+      }));
+      toast?.("✅ Threat analysis completed! Result ready.", "success");
+      loadData(true);
+    } catch (err) {
+      console.error("Workflow execution error:", err);
+      setHudStage("error");
+      setHudError(err.message || "Failed to record audio or execute AI diagnosis.");
+      toast?.("Sensor workflow error: " + (err.message || "Error"), "error");
+    } finally {
+      isExecutingWorkflowRef.current = false;
+      setListeningVibeNodeId(null);
+      setVibeStage("idle");
+    }
+  };
+
+  // Start the vibration listening workflow with 5-second auto-trigger
+  const handleStartVibrationWorkflow = async (node) => {
+    if (!node?.node_id || isExecutingWorkflowRef.current) return;
+
+    isExecutingWorkflowRef.current = true;
+    setListeningVibeNodeId(node.node_id);
+    setVibeStage("armed_waiting");
+    setHudNode(node);
+    setHudStage("listening_vibration");
+    setHudCountdown(5);
+    setHudVisible(true);
+    setHudCollapsed(false);
+    setHudResult(null);
+    setHudError(null);
+
+    toast?.(`🎧 Node #${node.node_id} listening for vibration... Strike sensor or auto-triggers in 5s.`, "info");
+
+    // Send single-shot arm command to ESP32 over serial if connected
+    try {
+      armNodeVibration(node.node_id).catch(() => {});
+    } catch (e) {
+      // ignore
+    }
+
+    if (vibrationTimeoutRef.current) {
+      clearInterval(vibrationTimeoutRef.current);
+    }
+
+    let count = 5;
+    vibrationTimeoutRef.current = setInterval(() => {
+      count -= 1;
+      setHudCountdown(count);
+
+      if (count <= 0) {
+        clearInterval(vibrationTimeoutRef.current);
+        vibrationTimeoutRef.current = null;
+        toast?.("⚡ Vibration auto-triggered! Recording started...", "info");
+        executeRecordingAndAnalysis(node, "5s Auto-Trigger");
+      }
+    }, 1000);
+  };
+
+  // Legacy alias for compatibility
+  const handleArmVibration = handleStartVibrationWorkflow;
+
+  // Set a node as PRIMARY IoT Sentinel
+  const handleSetPrimary = async (node) => {
+    if (!node?.node_id) return;
+    setSettingPrimary(true);
+    try {
+      try {
+        await setNodeAsPrimary(node.node_id);
+      } catch (fastApiErr) {
+        console.warn("FastAPI set primary error:", fastApiErr);
+      }
+      await api.post(`/admin/iot-nodes/${node.node_id}/primary`);
+      toast(`⭐ Node #${node.node_id} ('${node.name}') is now PRIMARY! Only this node will listen to the IoT hardware.`, "success");
+      loadData(true);
+      setSelectedNode((prev) => prev && prev.node_id === node.node_id ? { ...prev, is_primary: true, is_listening: true } : prev);
+    } catch (err) {
+      toast("Failed to set primary node: " + (err.response?.data?.error || err.message), "error");
+    } finally {
+      setSettingPrimary(false);
+    }
+  };
+
+  // Clear all data to start fresh
+  const handleClearAllData = async () => {
+    if (!window.confirm("⚠️ Are you sure you want to clear all previous telemetry, audio recordings, snapshot images, and start completely fresh?")) {
+      return;
+    }
+    setClearingData(true);
+    try {
+      try {
+        await clearAllIotHistory();
+      } catch (fastApiErr) {
+        console.warn("FastAPI clear failed, trying Express:", fastApiErr);
+      }
+      try {
+        await api.post("/admin/iot-nodes/clear-all");
+      } catch (expErr) {
+        console.warn("Express clear call:", expErr);
+      }
+      localStorage.clear();
+      sessionStorage.clear();
+      setVisitedHistory([]);
+      setSelectedNode(null);
+      toast("🧹 All previous telemetry, audio, images, and local storage cleared cleanly!", "success");
+      loadData(true);
+    } catch (err) {
+      toast("Failed to clear data: " + (err.message || "Unknown error"), "error");
+    } finally {
+      setClearingData(false);
     }
   };
 
@@ -499,6 +835,7 @@ const IotMapTab = ({ toast }) => {
       camera_url: node.camera_url || "",
       camera_stream_url: node.camera_stream_url || "",
       connect_serial: Boolean(node.is_listening || node.com_port),
+      is_primary: Boolean(node.is_primary),
     });
     refreshComPorts();
     setShowHardwareConfigModal(true);
@@ -514,6 +851,15 @@ const IotMapTab = ({ toast }) => {
       const camVal = hardwareForm.camera_url ? hardwareForm.camera_url.trim() : null;
       const streamVal = hardwareForm.camera_stream_url ? hardwareForm.camera_stream_url.trim() : null;
 
+      if (hardwareForm.is_primary) {
+        try {
+          await setNodeAsPrimary(hardwareConfigNode.node_id);
+        } catch (primErr) {
+          console.warn("Set primary in hardware config:", primErr);
+        }
+        await api.post(`/admin/iot-nodes/${hardwareConfigNode.node_id}/primary`);
+      }
+
       // 1. Save to Express Postgres database
       await api.patch(`/admin/iot-nodes/${hardwareConfigNode.node_id}`, {
         com_port: portVal,
@@ -521,6 +867,7 @@ const IotMapTab = ({ toast }) => {
         camera_url: camVal,
         camera_stream_url: streamVal,
         is_listening: hardwareForm.connect_serial,
+        is_primary: Boolean(hardwareForm.is_primary),
       });
 
       // 2. Configure FastAPI hardware bridge
@@ -699,10 +1046,94 @@ const IotMapTab = ({ toast }) => {
         ws.onmessage = (event) => {
           try {
             const data = JSON.parse(event.data);
+
+            if (data.event === "clear_all_reset" || data.event === "primary_node_updated") {
+              loadData(true);
+              return;
+            }
+
+            if (data.event === "vibration_listen_armed") {
+              setListeningVibeNodeId(data.node_id);
+              setVibeStage("armed_waiting");
+              return;
+            }
+
+            if (data.event === "vibration_strike_processing") {
+              setListeningVibeNodeId(data.node_id);
+              setVibeStage("generating_report");
+              if (vibrationTimeoutRef.current) {
+                clearInterval(vibrationTimeoutRef.current);
+                vibrationTimeoutRef.current = null;
+              }
+              toast?.("💥 Physical vibration strike detected! Starting laptop mic audio recording...", "info");
+              
+              setNodes((latest) => {
+                const nodeMatch = latest.find((n) => n.node_id === data.node_id) || { node_id: data.node_id, name: `Node #${data.node_id}` };
+                executeRecordingAndAnalysis(nodeMatch, "Physical SW-420 Sensor Strike");
+                return latest;
+              });
+              return;
+            }
+
+            if (data.event === "report_generation_complete") {
+              setVibeStage("idle");
+              setListeningVibeNodeId(null);
+              isExecutingWorkflowRef.current = false;
+              loadData(true);
+              setNodes((latest) => {
+                const nodeMatch = latest.find((n) => n.node_id === data.node_id);
+                if (nodeMatch) {
+                  handleOpenNodeMemory(nodeMatch);
+                }
+                return latest;
+              });
+              return;
+            }
+
             if (data.event === "telemetry_update") {
-              // Update node live in state
+              if (data.report_completed || data.audio_ai_analysis || data.vision_ai_analysis) {
+                setVibeStage("idle");
+                setListeningVibeNodeId(null);
+                isExecutingWorkflowRef.current = false;
+                setHudStage("completed");
+                setHudResult((prev) => ({
+                  ...prev,
+                  node_name: data.node_name,
+                  severity: data.severity,
+                  threat_type: data.threat_type,
+                  sound_level_db: data.sound_level_db,
+                  confidence: data.confidence,
+                  audio_url: data.audio_sample_url || prev?.audio_url,
+                  image_url: data.image_snapshot_url || prev?.image_url,
+                  audio_ai: data.audio_ai_analysis || prev?.audio_ai,
+                  vision_ai: data.vision_ai_analysis || prev?.vision_ai,
+                  timestamp: data.timestamp,
+                }));
+                setNodes((latest) => {
+                  const nodeMatch = latest.find((n) => n.node_id === data.node_id || n.device_uid === data.device_uid);
+                  if (nodeMatch) {
+                    handleOpenNodeMemory(nodeMatch);
+                  }
+                  return latest;
+                });
+              }
+
+              const isPerimeterThreat = data.all_nodes_alert || data.severity === "ALERT";
+
+              // Update node live in state (if perimeter threat, elevate all nodes)
               setNodes((prev) =>
                 prev.map((n) => {
+                  if (isPerimeterThreat) {
+                    return {
+                      ...n,
+                      status: "ALERT",
+                      last_ping: data.timestamp,
+                      _count: {
+                        ...n._count,
+                        trigger_events: (n._count?.trigger_events || 0) + (n.node_id === data.node_id ? 1 : 0),
+                      },
+                    };
+                  }
                   if (n.node_id === data.node_id || n.device_uid === data.device_uid) {
                     return {
                       ...n,
@@ -721,7 +1152,11 @@ const IotMapTab = ({ toast }) => {
 
               // Update selected node if open
               setSelectedNode((prev) => {
-                if (!prev || (prev.node_id !== data.node_id && prev.device_uid !== data.device_uid)) return prev;
+                if (!prev) return prev;
+                if (isPerimeterThreat) {
+                  return { ...prev, status: "ALERT" };
+                }
+                if (prev.node_id !== data.node_id && prev.device_uid !== data.device_uid) return prev;
                 return {
                   ...prev,
                   status: data.node_status || prev.status,
@@ -998,7 +1433,7 @@ const IotMapTab = ({ toast }) => {
       if (isNaN(lat) || isNaN(lng)) return;
 
       const marker = L.marker([lat, lng], {
-        icon: createNodeIcon(node.status, node.name),
+        icon: createNodeIcon(node.status, node.name, Boolean(node.is_primary)),
       });
 
       const statusColor = NODE_STATUS_COLOR[node.status] || "#4ade80";
@@ -1006,7 +1441,10 @@ const IotMapTab = ({ toast }) => {
       const popupContent = `
         <div style="font-family: sans-serif; min-width: 220px; color: #fff; padding: 4px;">
           <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 6px;">
-            <strong style="font-size: 13px; color: #fff;">${node.name}</strong>
+            <div style="display:flex; align-items:center; gap: 4px;">
+              ${node.is_primary ? `<span style="font-size: 9px; font-weight: 800; padding: 1px 5px; border-radius: 4px; background: #fbbf24; color: #000;">★ PRIMARY</span>` : ""}
+              <strong style="font-size: 13px; color: #fff;">${node.name}</strong>
+            </div>
             <span style="font-size: 9px; font-weight: 800; padding: 2px 6px; border-radius: 999px; background: ${statusColor}22; color: ${statusColor}; border: 1px solid ${statusColor}44;">
               ${node.status}
             </span>
@@ -1296,6 +1734,7 @@ const IotMapTab = ({ toast }) => {
       camera_url: "",
       camera_stream_url: "",
       notes: "",
+      is_primary: nodes.length === 0,
     });
 
     refreshComPorts();
@@ -1318,10 +1757,17 @@ const IotMapTab = ({ toast }) => {
         zone_id: nodeForm.zone_id ? parseInt(nodeForm.zone_id, 10) : null,
         custom_area_id: nodeForm.custom_area_id ? parseInt(nodeForm.custom_area_id, 10) : null,
         is_listening: Boolean(nodeForm.com_port),
+        is_primary: Boolean(nodeForm.is_primary),
       });
 
       const deployedNode = res.data?.node;
-      if (deployedNode && nodeForm.com_port) {
+      if (deployedNode && nodeForm.is_primary) {
+        try {
+          await setNodeAsPrimary(deployedNode.node_id);
+        } catch (primErr) {
+          console.warn("Set primary on deploy:", primErr);
+        }
+      } else if (deployedNode && nodeForm.com_port) {
         try {
           await updateNodeHardwareConfig(deployedNode.node_id, {
             com_port: nodeForm.com_port,
@@ -1532,6 +1978,17 @@ const IotMapTab = ({ toast }) => {
             <Send size={13} className="text-sky-400" />
             <span>@DeepGreen_TheBot</span>
           </a>
+
+          {/* Reset & Clear All Data Button */}
+          <button
+            onClick={handleClearAllData}
+            disabled={clearingData}
+            title="Clear all recorded audio, snapshots, trigger history, and reset fleet cleanly"
+            className="flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-bold transition bg-red-500/15 hover:bg-red-500/25 border border-red-500/30 text-red-300 cursor-pointer shadow-sm disabled:opacity-50"
+          >
+            <Trash2 size={13} className={clearingData ? "animate-spin" : ""} />
+            <span>{clearingData ? "Clearing..." : "Clear Data"}</span>
+          </button>
         </div>
       </div>
 
@@ -1768,6 +2225,11 @@ const IotMapTab = ({ toast }) => {
                               <h4 className="text-xs font-black text-white group-hover:text-lime-300 transition">
                                 {node.name}
                               </h4>
+                              {node.is_primary && (
+                                <span className="px-1.5 py-0.5 rounded text-[9px] font-black bg-amber-400 text-black shadow-sm shrink-0">
+                                  ★ PRIMARY
+                                </span>
+                              )}
                             </div>
                             <p className="text-[10px] text-white/40 font-mono mt-0.5">{node.device_uid}</p>
                           </div>
@@ -2304,6 +2766,35 @@ const IotMapTab = ({ toast }) => {
                         <Terminal size={11} className="text-cyan-400" /> Hardware Log
                       </button>
                     </div>
+
+                    {/* Primary IoT Sentinel Status Card */}
+                    <div className="flex items-center justify-between p-2 rounded-xl bg-amber-400/10 border border-amber-400/25 mt-1.5">
+                      <div className="flex items-center gap-1.5">
+                        <Star size={14} className={selectedNode.is_primary ? "text-amber-400 fill-amber-400" : "text-white/40"} />
+                        <div>
+                          <div className="text-[11px] font-bold text-white flex items-center gap-1">
+                            {selectedNode.is_primary ? "★ Primary IoT Sentinel" : "Secondary Fleet Node"}
+                          </div>
+                          <p className="text-[9px] text-white/40">
+                            {selectedNode.is_primary ? "Listening to Device 1" : "Click to route Device 1 here"}
+                          </p>
+                        </div>
+                      </div>
+                      {!selectedNode.is_primary ? (
+                        <button
+                          type="button"
+                          onClick={() => handleSetPrimary(selectedNode)}
+                          disabled={settingPrimary}
+                          className="px-2.5 py-1 rounded-lg text-[10px] font-black uppercase tracking-wider bg-amber-400 text-black hover:bg-amber-300 transition shadow cursor-pointer disabled:opacity-50"
+                        >
+                          {settingPrimary ? "Setting..." : "Set as Primary"}
+                        </button>
+                      ) : (
+                        <span className="text-[10px] font-mono text-amber-300 font-bold px-2 py-0.5 rounded bg-amber-400/20 border border-amber-400/40">
+                          Active Listener
+                        </span>
+                      )}
+                    </div>
                   </div>
                 </div>
 
@@ -2312,6 +2803,62 @@ const IotMapTab = ({ toast }) => {
                   <div className="text-[10px] font-bold uppercase tracking-wider text-lime-400">
                     On-Demand Edge Hardware Controls
                   </div>
+
+                  {/* Single-Shot Arming: Listen for Physical Vibration with 5s Auto-Trigger */}
+                  {(() => {
+                    const isThisNodeActive = hudNode?.node_id === selectedNode.node_id || listeningVibeNodeId === selectedNode.node_id;
+                    const isListeningVibe = isThisNodeActive && hudStage === "listening_vibration";
+                    const isRecordingAudio = isThisNodeActive && hudStage === "recording_audio";
+                    const isCapturingImage = isThisNodeActive && hudStage === "capturing_image";
+                    const isAnalyzingAi = isThisNodeActive && hudStage === "analyzing_ai";
+                    const isBusy = isListeningVibe || isRecordingAudio || isCapturingImage || isAnalyzingAi || vibeStage === "generating_report";
+
+                    return (
+                      <button
+                        type="button"
+                        onClick={() => handleStartVibrationWorkflow(selectedNode)}
+                        disabled={isBusy}
+                        className={`flex items-center justify-center gap-2 w-full py-2.5 px-3 rounded-xl text-xs font-black uppercase tracking-wider transition shadow-md cursor-pointer ${
+                          isListeningVibe
+                            ? "bg-amber-500/20 text-amber-300 border border-amber-500/40 cursor-not-allowed opacity-90 animate-pulse"
+                            : isRecordingAudio
+                            ? "bg-red-500/25 text-red-300 border border-red-500/50 cursor-not-allowed animate-pulse"
+                            : isCapturingImage
+                            ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 cursor-not-allowed"
+                            : isAnalyzingAi || isBusy
+                            ? "bg-purple-500/20 text-purple-300 border border-purple-500/40 cursor-not-allowed"
+                            : "bg-emerald-500 hover:bg-emerald-400 text-black border border-emerald-400/50 shadow-emerald-500/20 hover:scale-[1.01]"
+                        }`}
+                      >
+                        {isListeningVibe ? (
+                          <>
+                            <Radio size={14} className="animate-pulse text-amber-400" />
+                            <span>Listening for Vibration ({hudCountdown}s)...</span>
+                          </>
+                        ) : isRecordingAudio ? (
+                          <>
+                            <Mic size={14} className="animate-bounce text-red-400" />
+                            <span>Recording Laptop Mic ({hudCountdown}s)...</span>
+                          </>
+                        ) : isCapturingImage ? (
+                          <>
+                            <Camera size={14} className="animate-spin text-cyan-400" />
+                            <span>Capturing Camera Frame...</span>
+                          </>
+                        ) : isAnalyzingAi || isBusy ? (
+                          <>
+                            <RefreshCw size={14} className="animate-spin text-purple-400" />
+                            <span>AI Analyzing Acoustic & Vision...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Activity size={14} />
+                            <span>Listen for Vibration</span>
+                          </>
+                        )}
+                      </button>
+                    );
+                  })()}
 
                   <div className="grid grid-cols-2 gap-2">
                     <button
@@ -2702,6 +3249,19 @@ const IotMapTab = ({ toast }) => {
                   />
                 </div>
               </div>
+
+              {/* Set as Primary Sentinel Checkbox */}
+              <label className="flex items-center gap-2 pt-1 border-t border-white/5 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={Boolean(nodeForm.is_primary)}
+                  onChange={(e) => setNodeForm({ ...nodeForm, is_primary: e.target.checked })}
+                  className="rounded text-amber-400 focus:ring-amber-400"
+                />
+                <span className="text-[11px] font-bold text-amber-300">
+                  ★ Designate as Primary Node (Exclusively listens to Device 1 USB Serial)
+                </span>
+              </label>
             </div>
 
             <div>
@@ -2852,6 +3412,19 @@ const IotMapTab = ({ toast }) => {
                   />
                 </div>
               </div>
+
+              {/* Set as Primary Sentinel Checkbox */}
+              <label className="flex items-center gap-2 pt-1 border-t border-white/5 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={Boolean(hardwareForm.is_primary)}
+                  onChange={(e) => setHardwareForm({ ...hardwareForm, is_primary: e.target.checked })}
+                  className="rounded text-amber-400 focus:ring-amber-400"
+                />
+                <span className="text-[11px] font-bold text-amber-300">
+                  ★ Designate as Primary Node (Exclusively listens to Device 1 USB Serial)
+                </span>
+              </label>
             </div>
 
             <div className="flex items-center gap-2 p-2 rounded-xl bg-white/[0.03] border border-white/5">
@@ -2953,6 +3526,377 @@ const IotMapTab = ({ toast }) => {
             </div>
           </div>
         </Modal>
+      )}
+
+      {/* Floating Bottom-Right Live Workflow HUD */}
+      {hudVisible && (
+        <div className="fixed bottom-6 right-6 z-[9999] w-[420px] max-w-[calc(100vw-3rem)] bg-slate-950/95 backdrop-blur-xl border border-white/20 rounded-2xl shadow-2xl overflow-hidden text-white transition-all duration-300">
+          {/* Header */}
+          <div className="flex items-center justify-between px-4 py-3 bg-gradient-to-r from-slate-900 to-slate-950 border-b border-white/10">
+            <div className="flex items-center gap-2">
+              <span
+                className={`flex h-2.5 w-2.5 rounded-full ${
+                  hudStage === "completed"
+                    ? hudResult?.severity === "ALERT"
+                      ? "bg-red-500 animate-ping"
+                      : "bg-emerald-400"
+                    : hudStage === "error"
+                    ? "bg-red-400"
+                    : "bg-amber-400 animate-pulse"
+                }`}
+              />
+              <span className="text-xs font-black tracking-wider uppercase text-white/90">
+                Threat Detection HUD
+              </span>
+              {hudNode && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/10 text-white/60 font-mono">
+                  #{hudNode.node_id} {hudNode.name}
+                </span>
+              )}
+            </div>
+
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() => setHudCollapsed((prev) => !prev)}
+                className="p-1 rounded-lg text-white/50 hover:text-white hover:bg-white/10 transition"
+                title={hudCollapsed ? "Expand HUD" : "Minimize HUD"}
+              >
+                {hudCollapsed ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setHudVisible(false);
+                  if (vibrationTimeoutRef.current) {
+                    clearInterval(vibrationTimeoutRef.current);
+                    vibrationTimeoutRef.current = null;
+                  }
+                  isExecutingWorkflowRef.current = false;
+                  setListeningVibeNodeId(null);
+                  setVibeStage("idle");
+                }}
+                className="p-1 rounded-lg text-white/50 hover:text-white hover:bg-white/10 transition"
+                title="Close HUD"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          </div>
+
+          {/* Body */}
+          {!hudCollapsed && (
+            <div className="p-4 flex flex-col gap-3 text-xs max-h-[75vh] overflow-y-auto">
+              {/* Stepper Status Indicators */}
+              <div className="flex items-center justify-between gap-1 p-2 rounded-xl bg-white/5 border border-white/5">
+                {/* Step 1: Vibration */}
+                <div className={`flex flex-col items-center flex-1 text-center ${hudStage === "listening_vibration" ? "text-amber-300 font-bold" : ["recording_audio", "capturing_image", "analyzing_ai", "completed"].includes(hudStage) ? "text-emerald-400" : "text-white/40"}`}>
+                  <div className={`flex h-6 w-6 items-center justify-center rounded-full mb-1 ${hudStage === "listening_vibration" ? "bg-amber-500/20 border border-amber-400 animate-pulse" : ["recording_audio", "capturing_image", "analyzing_ai", "completed"].includes(hudStage) ? "bg-emerald-500/20 text-emerald-400" : "bg-white/10"}`}>
+                    {["recording_audio", "capturing_image", "analyzing_ai", "completed"].includes(hudStage) ? <Check size={12} /> : <Radio size={12} />}
+                  </div>
+                  <span className="text-[9px] uppercase tracking-tighter">Vibration</span>
+                </div>
+
+                <div className="h-0.5 w-3 bg-white/10" />
+
+                {/* Step 2: Audio Mic */}
+                <div className={`flex flex-col items-center flex-1 text-center ${hudStage === "recording_audio" ? "text-red-300 font-bold" : ["capturing_image", "analyzing_ai", "completed"].includes(hudStage) ? "text-emerald-400" : "text-white/40"}`}>
+                  <div className={`flex h-6 w-6 items-center justify-center rounded-full mb-1 ${hudStage === "recording_audio" ? "bg-red-500/20 border border-red-400 animate-pulse" : ["capturing_image", "analyzing_ai", "completed"].includes(hudStage) ? "bg-emerald-500/20 text-emerald-400" : "bg-white/10"}`}>
+                    {["capturing_image", "analyzing_ai", "completed"].includes(hudStage) ? <Check size={12} /> : <Mic size={12} />}
+                  </div>
+                  <span className="text-[9px] uppercase tracking-tighter">Audio Mic</span>
+                </div>
+
+                <div className="h-0.5 w-3 bg-white/10" />
+
+                {/* Step 3: Camera */}
+                <div className={`flex flex-col items-center flex-1 text-center ${hudStage === "capturing_image" ? "text-cyan-300 font-bold" : ["analyzing_ai", "completed"].includes(hudStage) ? "text-emerald-400" : "text-white/40"}`}>
+                  <div className={`flex h-6 w-6 items-center justify-center rounded-full mb-1 ${hudStage === "capturing_image" ? "bg-cyan-500/20 border border-cyan-400 animate-pulse" : ["analyzing_ai", "completed"].includes(hudStage) ? "bg-emerald-500/20 text-emerald-400" : "bg-white/10"}`}>
+                    {["analyzing_ai", "completed"].includes(hudStage) ? <Check size={12} /> : <Camera size={12} />}
+                  </div>
+                  <span className="text-[9px] uppercase tracking-tighter">Camera</span>
+                </div>
+
+                <div className="h-0.5 w-3 bg-white/10" />
+
+                {/* Step 4: AI Agent */}
+                <div className={`flex flex-col items-center flex-1 text-center ${hudStage === "analyzing_ai" ? "text-purple-300 font-bold" : hudStage === "completed" ? "text-emerald-400" : "text-white/40"}`}>
+                  <div className={`flex h-6 w-6 items-center justify-center rounded-full mb-1 ${hudStage === "analyzing_ai" ? "bg-purple-500/20 border border-purple-400 animate-spin" : hudStage === "completed" ? "bg-emerald-500/20 text-emerald-400" : "bg-white/10"}`}>
+                    {hudStage === "completed" ? <Check size={12} /> : <Sparkles size={12} />}
+                  </div>
+                  <span className="text-[9px] uppercase tracking-tighter">AI Agent</span>
+                </div>
+              </div>
+
+              {/* Dynamic State Info Cards */}
+              {hudStage === "listening_vibration" && (
+                <div className="flex flex-col gap-2 p-3 rounded-xl bg-amber-500/10 border border-amber-500/30">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-amber-300 flex items-center gap-1.5">
+                      <Radio size={14} className="animate-pulse" />
+                      Listening for Vibration...
+                    </span>
+                    <span className="text-xs font-mono font-black px-2 py-0.5 rounded bg-amber-500/20 text-amber-300">
+                      {hudCountdown}s
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-white/70 leading-relaxed">
+                    Strike the physical SW-420 sensor to trigger immediately, or recording starts automatically when the timer reaches zero.
+                  </p>
+                  <div className="w-full bg-white/10 rounded-full h-1.5 overflow-hidden">
+                    <div
+                      className="bg-amber-400 h-1.5 rounded-full transition-all duration-1000 ease-linear"
+                      style={{ width: `${(hudCountdown / 5) * 100}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {hudStage === "recording_audio" && (
+                <div className="flex flex-col gap-2 p-3 rounded-xl bg-red-500/10 border border-red-500/30">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-red-300 flex items-center gap-1.5">
+                      <span className="h-2 w-2 rounded-full bg-red-500 animate-ping" />
+                      Recording Laptop Microphone...
+                    </span>
+                    <span className="text-xs font-mono font-black px-2 py-0.5 rounded bg-red-500/20 text-red-300">
+                      {hudCountdown}s remaining
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-white/70 leading-relaxed">
+                    Capturing acoustic signature directly from your laptop microphone for AI Whisper ingestion.
+                  </p>
+                  {/* Waveform animation bars */}
+                  <div className="flex items-center justify-center gap-1 h-8 bg-black/30 rounded-lg px-3">
+                    {[16, 24, 32, 20, 28, 12, 26, 30, 18, 22].map((height, i) => (
+                      <span
+                        key={i}
+                        className="w-1 bg-red-400 rounded-full animate-pulse"
+                        style={{
+                          height: `${Math.max(6, (height * (6 - hudCountdown)) / 5)}px`,
+                          animationDelay: `${i * 120}ms`,
+                        }}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {hudStage === "capturing_image" && (
+                <div className="flex items-center gap-3 p-3 rounded-xl bg-cyan-500/10 border border-cyan-500/30 text-cyan-200">
+                  <Camera size={18} className="animate-spin text-cyan-400" />
+                  <div>
+                    <div className="font-bold text-xs">Capturing Optical Frame...</div>
+                    <div className="text-[10px] text-white/60">Taking snapshot for Vision AI analysis</div>
+                  </div>
+                </div>
+              )}
+
+              {hudStage === "analyzing_ai" && (
+                <div className="flex flex-col gap-2 p-3 rounded-xl bg-purple-500/10 border border-purple-500/30 text-purple-200">
+                  <div className="flex items-center gap-2 font-bold text-xs">
+                    <RefreshCw size={14} className="animate-spin text-purple-400" />
+                    <span>Analyzing with AI Agents...</span>
+                  </div>
+                  <div className="text-[11px] text-white/70 space-y-1">
+                    <div className="flex items-center gap-1.5">
+                      <Check size={11} className="text-emerald-400" /> Whisper Acoustic Transcription
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <Check size={11} className="text-emerald-400" /> GPT-4o-mini Acoustic Reasoning
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <Sparkles size={11} className="text-purple-400 animate-pulse" /> Vision AI Inspection
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {hudStage === "error" && (
+                <div className="p-3 rounded-xl bg-red-500/20 border border-red-500/40 text-red-200 flex flex-col gap-2">
+                  <div className="flex items-center gap-2 font-bold text-xs">
+                    <AlertTriangle size={14} /> Workflow Error
+                  </div>
+                  <p className="text-[11px] text-white/80">{hudError || "An error occurred."}</p>
+                </div>
+              )}
+
+              {/* Analysis Completed: Show Both Audio & Image Results */}
+              {hudStage === "completed" && (
+                <div className="flex flex-col gap-3">
+                  {/* Status Banner */}
+                  <div
+                    className={`p-3 rounded-xl border flex items-center justify-between ${
+                      hudResult?.severity === "ALERT"
+                        ? "bg-red-500/15 border-red-500/40 text-red-200"
+                        : "bg-emerald-500/15 border-emerald-500/40 text-emerald-200"
+                    }`}
+                  >
+                    <div>
+                      <div className="text-[10px] uppercase font-bold tracking-wider opacity-70">Detection Status</div>
+                      <div className="text-sm font-black flex items-center gap-1.5">
+                        {hudResult?.severity === "ALERT" ? (
+                          <>
+                            <AlertTriangle size={16} className="text-red-400" />
+                            <span>{hudResult?.threat_type || "SECURITY ALERT"}</span>
+                          </>
+                        ) : (
+                          <>
+                            <CheckCircle size={16} className="text-emerald-400" />
+                            <span>{hudResult?.threat_type || "NORMAL AMBIENT"}</span>
+                          </>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="text-right">
+                      <span
+                        className={`px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-wider ${
+                          hudResult?.severity === "ALERT"
+                            ? "bg-red-500 text-white"
+                            : "bg-emerald-500 text-black font-bold"
+                        }`}
+                      >
+                        {hudResult?.severity || "INFO"}
+                      </span>
+                      {hudResult?.sound_level_db && (
+                        <div className="text-[10px] text-white/60 font-mono mt-0.5">
+                          {hudResult.sound_level_db} dB SPL
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Audio AI Analysis Result */}
+                  <div className="p-3 rounded-xl bg-white/5 border border-white/10 flex flex-col gap-2">
+                    <div className="flex items-center justify-between text-cyan-300 font-bold text-xs">
+                      <span className="flex items-center gap-1.5">
+                        <Volume2 size={13} /> Acoustic AI Analysis
+                      </span>
+                      {hudResult?.confidence && (
+                        <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-200">
+                          {Math.round(hudResult.confidence * 100)}% Conf
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Whisper transcript if available */}
+                    {hudResult?.audio_ai?.transcription && (
+                      <div className="p-2 rounded-lg bg-black/40 border border-white/5 text-[11px] text-white/90 italic">
+                        "{hudResult.audio_ai.transcription}"
+                      </div>
+                    )}
+
+                    {/* Reasoning */}
+                    <p className="text-[11px] text-white/70 leading-relaxed">
+                      {hudResult?.audio_ai?.reasoning || hudResult?.details || "Acoustic evaluation completed."}
+                    </p>
+
+                    {/* Audio Player if URL available */}
+                    {hudResult?.audio_url && (
+                      <div className="mt-1 pt-1 border-t border-white/5">
+                        <audio
+                          controls
+                          className="w-full h-7 rounded opacity-90"
+                          src={
+                            hudResult.audio_url.startsWith("http")
+                              ? hudResult.audio_url
+                              : `http://localhost:8000${hudResult.audio_url}`
+                          }
+                        />
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Image / Vision AI Analysis Result */}
+                  <div className="p-3 rounded-xl bg-white/5 border border-white/10 flex flex-col gap-2">
+                    <div className="flex items-center justify-between text-purple-300 font-bold text-xs">
+                      <span className="flex items-center gap-1.5">
+                        <Camera size={13} /> Optical Vision AI Analysis
+                      </span>
+                      {hudResult?.vision_ai?.visual_threat !== undefined && (
+                        <span
+                          className={`text-[9px] font-black uppercase px-1.5 py-0.5 rounded ${
+                            hudResult.vision_ai.visual_threat
+                              ? "bg-red-500/20 text-red-300 border border-red-500/30"
+                              : "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                          }`}
+                        >
+                          {hudResult.vision_ai.visual_threat ? "Visual Threat Detected" : "Clear / No Threat"}
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Image Snapshot Preview */}
+                    {hudResult?.image_url ? (
+                      <div className="relative rounded-lg overflow-hidden border border-white/10 bg-black/50 aspect-video flex items-center justify-center">
+                        <img
+                          src={
+                            hudResult.image_url.startsWith("http")
+                              ? hudResult.image_url
+                              : `http://localhost:8000${hudResult.image_url}`
+                          }
+                          alt="Forensic Optical Snapshot"
+                          className="w-full h-full object-cover"
+                        />
+                      </div>
+                    ) : (
+                      <div className="text-[10px] text-white/40 italic p-2 bg-black/20 rounded">
+                        Camera snapshot not acquired or camera offline.
+                      </div>
+                    )}
+
+                    {/* Vision AI Reasoning */}
+                    {hudResult?.vision_ai?.reasoning && (
+                      <p className="text-[11px] text-white/70 leading-relaxed">
+                        {hudResult.vision_ai.reasoning}
+                      </p>
+                    )}
+
+                    {/* Detected Objects Tags */}
+                    {hudResult?.vision_ai?.detected_objects?.length > 0 && (
+                      <div className="flex flex-wrap gap-1 mt-1">
+                        {hudResult.vision_ai.detected_objects.map((obj, i) => (
+                          <span
+                            key={i}
+                            className="text-[9px] px-1.5 py-0.5 rounded bg-white/10 text-white/80 font-mono"
+                          >
+                            🏷️ {obj}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Actions */}
+                  <div className="flex items-center gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const targetNode = hudNode || (nodes.find((n) => n.node_id === hudResult?.node_id));
+                        if (targetNode) handleOpenNodeMemory(targetNode);
+                      }}
+                      className="flex-1 py-2 px-3 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-bold transition flex items-center justify-center gap-1.5"
+                    >
+                      <History size={13} />
+                      <span>View Node Memory</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setHudVisible(false);
+                      }}
+                      className="py-2 px-4 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-black text-xs font-black transition"
+                    >
+                      Done
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       )}
     </div>
   );

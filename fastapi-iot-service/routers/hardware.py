@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException, BackgroundTasks, File, UploadFile, Form
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
 import logging
@@ -10,6 +10,8 @@ from database import (
     update_node_hardware_config,
     insert_trigger_event,
     update_node_status,
+    set_primary_node,
+    clear_all_iot_history,
 )
 from services.serial_manager import serial_bridge
 from services.camera_client import CameraClient
@@ -221,6 +223,152 @@ async def trigger_manual_audio_record(node_id: int):
         "message": f"Manual 5-second audio acquisition command transmitted to Node #{node_id}. Audio stream incoming over USB..."
     }
 
+@router.post("/nodes/{node_id}/arm-vibration")
+async def arm_node_vibration(node_id: int):
+    """
+    Arms the physical SW-420 vibration sensor on Device 1 (ESP32) for a single strike event.
+    When armed, the next physical vibration will trigger 5-second acoustic recording,
+    run the AI pipeline, take an optical snapshot if escalated, and save to Node Memory.
+    The sensor automatically disarms itself immediately after the strike.
+    """
+    node = await get_node_by_identifier(str(node_id))
+    if not node:
+        raise HTTPException(status_code=404, detail=f"IoT Node ID {node_id} not found.")
+
+    if not serial_bridge.is_listening(node_id):
+        com_port = node.get("com_port")
+        if com_port:
+            connected = serial_bridge.connect_node(node_id, com_port, node.get("baud_rate") or 115200)
+            if not connected:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Node is not connected on {com_port}. Please connect the USB serial port first."
+                )
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Node has no COM port configured and serial bridge is not connected."
+            )
+
+    success = serial_bridge.arm_vibration(node_id)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to transmit ARM_VIBRATION command to ESP32 over serial.")
+
+    # Broadcast arm status over WebSocket to keep UI reactive
+    await manager.broadcast({
+        "event": "vibration_listen_armed",
+        "node_id": node_id,
+        "message": f"Node #{node_id} vibration sensor is now armed and listening."
+    })
+
+    return {
+        "status": "success",
+        "message": f"Vibration sensor on Node #{node_id} is now ARMED and listening for next physical strike.",
+        "node_id": node_id,
+        "armed": True
+    }
+
+@router.post("/nodes/{node_id}/upload-audio")
+async def upload_audio_acquisition(
+    node_id: int,
+    file: Optional[UploadFile] = File(None),
+    image: Optional[UploadFile] = File(None),
+    audio_base64: Optional[str] = Form(None),
+    image_base64: Optional[str] = Form(None),
+    trigger_source: str = Form("LAPTOP_MIC_ACQUISITION")
+):
+    """
+    Ingests live audio recorded directly from the operator's laptop microphone (or client),
+    with optional camera snapshot frame.
+    Processes the recording through the autonomous multi-tier AI pipeline (Whisper + GPT-4o-mini).
+    If a threat is classified, optical snapshot and Vision AI analysis are triggered.
+    """
+    from services.event_pipeline import process_incoming_audio_event
+    import base64
+    import time
+    from pathlib import Path
+
+    node = await get_node_by_identifier(str(node_id))
+    if not node:
+        raise HTTPException(status_code=404, detail=f"IoT Node ID {node_id} not found.")
+
+    audio_bytes = None
+    if file:
+        audio_bytes = await file.read()
+    elif audio_base64:
+        b64_data = audio_base64
+        if "," in b64_data:
+            b64_data = b64_data.split(",", 1)[1]
+        try:
+            audio_bytes = base64.b64decode(b64_data)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid audio base64: {e}")
+
+    if not audio_bytes or len(audio_bytes) < 100:
+        raise HTTPException(status_code=400, detail="No valid audio data provided.")
+
+    base_dir = Path(__file__).resolve().parent.parent
+    audio_dir = base_dir / "uploads" / "audio"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    images_dir = base_dir / "uploads" / "images"
+    images_dir.mkdir(parents=True, exist_ok=True)
+
+    ts = int(time.time() * 1000)
+
+    # Save audio file
+    audio_filename = f"laptop_threat_node{node_id}_{ts}.wav"
+    audio_path = audio_dir / audio_filename
+    with open(audio_path, "wb") as f:
+        f.write(audio_bytes)
+
+    relative_audio_url = f"/uploads/audio/{audio_filename}"
+
+    # Handle image if provided
+    img_path = None
+    relative_img_url = None
+    img_bytes = None
+    if image:
+        img_bytes = await image.read()
+    elif image_base64:
+        b64_img = image_base64
+        if "," in b64_img:
+            b64_img = b64_img.split(",", 1)[1]
+        try:
+            img_bytes = base64.b64decode(b64_img)
+        except Exception:
+            pass
+
+    if img_bytes and len(img_bytes) > 200:
+        img_filename = f"laptop_snap_node{node_id}_{ts}.jpg"
+        img_path = images_dir / img_filename
+        with open(img_path, "wb") as f:
+            f.write(img_bytes)
+        relative_img_url = f"/uploads/images/{img_filename}"
+
+    payload = {
+        "node_id": node_id,
+        "device_uid": node.get("device_uid", f"NODE-{node_id}"),
+        "audio_file_path": str(audio_path),
+        "audio_sample_url": relative_audio_url,
+        "image_file_path": str(img_path) if img_path else None,
+        "image_snapshot_url": relative_img_url,
+        "trigger_source": trigger_source,
+        "file_size": len(audio_bytes),
+        "timestamp": ts
+    }
+
+    logger.info(f"🎤 [UploadAudio] Received {len(audio_bytes)} bytes audio from laptop mic for Node #{node_id}.")
+    await process_incoming_audio_event(payload)
+
+    return {
+        "status": "success",
+        "message": "Audio processed through AI pipeline successfully.",
+        "node_id": node_id,
+        "audio_url": relative_audio_url,
+        "image_url": relative_img_url,
+        "timestamp": ts
+    }
+
 @router.post("/nodes/{node_id}/manual-snapshot")
 async def trigger_manual_camera_snapshot(node_id: int):
     """
@@ -384,4 +532,95 @@ async def trigger_telegram_test_alert():
         "message": f"Test alert dispatched to {len(telegram_bot.subscribers)} Telegram subscribers.",
         "subscribers_count": len(telegram_bot.subscribers)
     }
+
+@router.post("/nodes/{node_id}/primary")
+async def designate_primary_node(node_id: int):
+    """
+    Designate a single IoT node as the Primary Node.
+    All other nodes lose primary status, and the physical serial listener automatically binds
+    strictly to this primary node's COM port.
+    """
+    node = await get_node_by_identifier(str(node_id))
+    if not node:
+        raise HTTPException(status_code=404, detail=f"IoT Node ID {node_id} not found.")
+
+    # 1. Update in database
+    updated = await set_primary_node(node_id)
+
+    # 2. Re-bind hardware serial listener exclusively to this primary node
+    # Disconnect all previous listeners first
+    for active_id in list(serial_bridge._listeners.keys()):
+        serial_bridge.disconnect_node(active_id)
+
+    com_port = node.get("com_port")
+    baud_rate = node.get("baud_rate") or 115200
+
+    connected = False
+    if com_port:
+        connected = serial_bridge.connect_node(node_id=node_id, port=com_port, baud_rate=baud_rate)
+        logger.info(f"⭐ [Hardware] Set Node #{node_id} ({node.get('name')}) as PRIMARY. Serial listener connected: {connected} on {com_port}.")
+
+    # 3. Broadcast to all open dashboards
+    await manager.broadcast({
+        "event": "primary_node_updated",
+        "node_id": node_id,
+        "name": node.get("name"),
+        "device_uid": node.get("device_uid"),
+        "is_listening": connected,
+        "com_port": com_port,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    })
+
+    return {
+        "status": "success",
+        "message": f"Node #{node_id} ('{node.get('name')}') designated as PRIMARY IoT node.",
+        "node_id": node_id,
+        "is_primary": True,
+        "serial_connected": connected,
+        "com_port": com_port
+    }
+
+@router.post("/clear-all")
+async def clear_all_data():
+    """
+    Clear all telemetry, trigger event history, saved audio WAV files, and snapshot images.
+    Resets all nodes' statuses back to ACTIVE.
+    """
+    from pathlib import Path
+    import os
+
+    # 1. Clear database trigger events and reset node statuses
+    db_result = await clear_all_iot_history()
+
+    # 2. Clear uploaded audio and images on disk
+    base_dir = Path(__file__).resolve().parent.parent
+    audio_dir = base_dir / "uploads" / "audio"
+    images_dir = base_dir / "uploads" / "images"
+
+    cleared_files = 0
+    for d in [audio_dir, images_dir]:
+        if d.exists():
+            for f in d.iterdir():
+                if f.is_file() and not f.name.startswith(".gitkeep"):
+                    try:
+                        f.unlink()
+                        cleared_files += 1
+                    except Exception as err:
+                        logger.warning(f"Could not remove {f.name}: {err}")
+
+    # 3. Broadcast reset event to all connected dashboard websockets
+    await manager.broadcast({
+        "event": "clear_all_reset",
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    })
+
+    logger.info(f"🧹 [ClearAll] Deleted all trigger events, reset nodes to ACTIVE, removed {cleared_files} files.")
+
+    return {
+        "status": "success",
+        "message": "All previous telemetry, audio recordings, snapshot images, and alerts cleared successfully.",
+        "cleared_files": cleared_files,
+        "db": db_result
+    }
+
 

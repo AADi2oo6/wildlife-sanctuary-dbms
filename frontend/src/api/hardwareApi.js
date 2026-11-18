@@ -69,6 +69,30 @@ export const triggerManualAudio = async (nodeId) => {
 };
 
 /**
+ * Arms the physical SW-420 vibration sensor on Device 1 (ESP32) for a single strike event.
+ */
+export const armNodeVibration = async (nodeId) => {
+  const res = await fastApiClient.post(`/api/hardware/nodes/${nodeId}/arm-vibration`);
+  return res.data;
+};
+
+/**
+ * Upload audio recorded directly via laptop microphone to run through AI pipeline.
+ */
+export const uploadLaptopAudio = async (nodeId, audioBlob, imageBlob = null) => {
+  const formData = new FormData();
+  formData.append("file", audioBlob, "laptop_audio.wav");
+  if (imageBlob) {
+    formData.append("image", imageBlob, "snapshot.jpg");
+  }
+  formData.append("trigger_source", "LAPTOP_MIC_ACQUISITION");
+  const res = await fastApiClient.post(`/api/hardware/nodes/${nodeId}/upload-audio`, formData, {
+    headers: { "Content-Type": "multipart/form-data" },
+  });
+  return res.data;
+};
+
+/**
  * Send HTTP snapshot request to Device 2 ESP32-CAM (/capture).
  */
 export const triggerManualSnapshot = async (nodeId) => {
@@ -101,6 +125,23 @@ export const fetchNodeLogs = async (nodeId) => {
  */
 export const updateNodeHardwareConfig = async (nodeId, configData) => {
   const res = await fastApiClient.patch(`/api/hardware/nodes/${nodeId}/config`, configData);
+  return res.data;
+};
+
+/**
+ * Designate a node as PRIMARY IoT node. All incoming physical IoT serial events
+ * will route to this primary node.
+ */
+export const setNodeAsPrimary = async (nodeId) => {
+  const res = await fastApiClient.post(`/api/hardware/nodes/${nodeId}/primary`);
+  return res.data;
+};
+
+/**
+ * Clear all trigger events, audio WAV files, snapshots, and reset nodes to ACTIVE.
+ */
+export const clearAllIotHistory = async () => {
+  const res = await fastApiClient.post("/api/hardware/clear-all");
   return res.data;
 };
 

@@ -606,6 +606,7 @@ export const createIotNode = async (req, res) => {
         camera_url: camera_url ? camera_url.trim() : null,
         camera_stream_url: camera_stream_url ? camera_stream_url.trim() : null,
         is_listening: Boolean(is_listening),
+        is_primary: Boolean(req.body.is_primary),
         notes: notes ? notes.trim() : null,
         zone_id: zone_id ? parseInt(zone_id, 10) : null,
         custom_area_id: custom_area_id ? parseInt(custom_area_id, 10) : null,
@@ -658,6 +659,15 @@ export const updateIotNode = async (req, res) => {
     if (camera_url !== undefined) data.camera_url = camera_url ? camera_url.trim() : null;
     if (camera_stream_url !== undefined) data.camera_stream_url = camera_stream_url ? camera_stream_url.trim() : null;
     if (is_listening !== undefined) data.is_listening = Boolean(is_listening);
+    if (req.body.is_primary !== undefined) {
+      if (req.body.is_primary) {
+        await prisma.iotNode.updateMany({
+          where: { is_primary: true },
+          data: { is_primary: false },
+        });
+      }
+      data.is_primary = Boolean(req.body.is_primary);
+    }
 
     const updatedNode = await prisma.iotNode.update({
       where: { node_id: id },
@@ -686,6 +696,49 @@ export const deleteIotNode = async (req, res) => {
     console.error('🔥 Admin – Delete IoT Node Error:', error);
     if (error.code === 'P2025') return res.status(404).json({ success: false, error: 'IoT node not found.' });
     return res.status(500).json({ success: false, error: 'Failed to delete IoT node.' });
+  }
+};
+
+/** POST /api/admin/iot-nodes/:id/primary — set a single node as primary */
+export const setPrimaryNode = async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    // Unset all previous primary nodes
+    await prisma.iotNode.updateMany({
+      where: { is_primary: true },
+      data: { is_primary: false },
+    });
+    // Mark target node as primary
+    const node = await prisma.iotNode.update({
+      where: { node_id: id },
+      data: { is_primary: true, is_listening: true },
+      include: {
+        zone: { select: { zone_id: true, name: true } },
+        custom_area: { select: { area_id: true, name: true, color: true } },
+      },
+    });
+    return res.status(200).json({ success: true, message: `Node #${id} designated as PRIMARY IoT node.`, node });
+  } catch (error) {
+    console.error('🔥 Admin – Set Primary Node Error:', error);
+    return res.status(500).json({ success: false, error: 'Failed to set primary node.' });
+  }
+};
+
+/** POST /api/admin/iot-nodes/clear-all — delete all trigger history & reset nodes to ACTIVE */
+export const clearAllIotData = async (req, res) => {
+  try {
+    const deleted = await prisma.iotTriggerEvent.deleteMany({});
+    await prisma.iotNode.updateMany({
+      data: { status: 'ACTIVE' },
+    });
+    return res.status(200).json({
+      success: true,
+      message: 'All previous telemetry, trigger events, and alert states cleared successfully.',
+      deletedEvents: deleted.count,
+    });
+  } catch (error) {
+    console.error('🔥 Admin – Clear All IoT Data Error:', error);
+    return res.status(500).json({ success: false, error: 'Failed to clear IoT data.' });
   }
 };
 

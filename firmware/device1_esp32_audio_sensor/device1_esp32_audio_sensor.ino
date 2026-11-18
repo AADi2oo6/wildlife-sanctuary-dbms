@@ -1,7 +1,7 @@
 /*
  =========================================================================================
-  🌲 DeepGreen / Wildlife Sanctuary IoT - Device 1 Firmware (Zero-SPIFFS Direct Stream)
-  Module: ESP32 + Vibration Sensor + INMP441 I2S Microphone
+  🌲 DeepGreen / Wildlife Sanctuary IoT - Device 1 Firmware (On-Demand Single-Shot Listen)
+  Module: ESP32 + Vibration Sensor (SW-420) + INMP441 I2S Microphone
   Hardware Pinout:
     - Vibration Sensor (SW-420): GPIO 34 (RTC GPIO ext0 wake / digital interrupt)
     - I2S WS (Word Select / L/R Clock): GPIO 25
@@ -13,11 +13,14 @@
   Features:
     - 5-Second 16kHz 16-bit Mono Audio Recording
     - DIRECT STREAMING OVER USB SERIAL: No SPIFFS partition required!
-      (Eliminates "SPIFFS partition could not be found" and flash memory wear)
-    - Dual Operation Modes:
-      1) Event-Triggered: Physical strike on vibration sensor triggers immediate capture
-      2) On-Demand / Manual: Host PC sends serial command "CMD:RECORD_5S" over USB
-    - Framed Serial Transmission with Metadata & Hex WAV byte stream
+    - Single-Shot Arming Mode:
+      * Boots into STANDBY / DISARMED state to eliminate false vibration triggers.
+      * Arms ONLY when user clicks "Listen for Vibration" in the web dashboard (CMD:ARM_VIBRATION).
+      * Upon detecting a physical strike while armed:
+          1. Immediately disarms itself and stops listening.
+          2. Streams 5-second 16kHz PCM audio to FastAPI over USB.
+          3. Returns to STANDBY until operator clicks "Listen for Vibration" again.
+    - On-Demand Manual Audio Command: "CMD:RECORD_5S"
  =========================================================================================
 */
 
@@ -26,10 +29,10 @@
 
 // --- Device Identity ---
 #define DEVICE_UID "DGN-NODE-67SF-608"
-#define FIRMWARE_VERSION "v2.1-direct-stream"
+#define FIRMWARE_VERSION "v2.2-single-shot-listen"
 
 // --- Hardware Pins ---
-#define VIBRATION_PIN GPIO_NUM_34 // RTC GPIO 34 supports ext0 deep sleep wake
+#define VIBRATION_PIN GPIO_NUM_34 // RTC GPIO 34
 #define I2S_WS 25
 #define I2S_SCK 26
 #define I2S_SD 33
@@ -41,25 +44,22 @@
 #define WAV_HEADER_SIZE 44
 
 // --- Power Management Mode ---
-// Set to 'false' if connected to host PC via USB wire (keeps UART active for on-demand commands)
-// Set to 'true' for battery-only field operation (enters deep sleep after each transmission)
 const bool ENABLE_DEEP_SLEEP = false;
 
 // Buffer for serial incoming commands
 String inputCommandBuffer = "";
 
-// --- Vibration Sensor State & Hardware Interrupt Configuration ---
-volatile bool g_vibrationDetected = false;
+// --- Vibration Sensor State & Arming Control ---
+volatile bool g_vibrationArmed = false;      // True ONLY after operator clicks "Listen for Vibration"
+volatile bool g_vibrationDetected = false;   // Flag set by ISR when strike occurs while armed
 volatile unsigned long g_lastVibeInterruptMs = 0;
-const unsigned long VIBRATION_DEBOUNCE_MS = 250;      // 250ms debounce (filters mechanical bounce & float)
-const unsigned long POST_TRIGGER_COOLDOWN_MS = 12000; // 12-second lockout post-recording to prevent false re-triggers
-
-unsigned long g_cooldownUntilMs = 0;
+const unsigned long VIBRATION_DEBOUNCE_MS = 250; // 250ms debounce filter
 
 void IRAM_ATTR onVibrationInterrupt() {
+  if (!g_vibrationArmed) return; // Disarmed: completely ignore
+
   unsigned long now = millis();
-  // Filter out any triggers during the post-trigger cooldown window or within debounce
-  if (now >= g_cooldownUntilMs && (now - g_lastVibeInterruptMs > VIBRATION_DEBOUNCE_MS)) {
+  if (now - g_lastVibeInterruptMs > VIBRATION_DEBOUNCE_MS) {
     g_vibrationDetected = true;
     g_lastVibeInterruptMs = now;
   }
@@ -88,7 +88,7 @@ bool initI2SMicrophone() {
   i2s_config_t i2s_config = {
     .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
     .sample_rate = SAMPLE_RATE,
-    .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT, // INMP441 uses 32-bit slot
+    .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,
     .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
     .communication_format = I2S_COMM_FORMAT_I2S,
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
@@ -213,84 +213,62 @@ void setup() {
   Serial.println("🌲 DEEPGREEN IoT - DEVICE 1: ACOUSTIC / SEISMIC SENSOR NODE");
   Serial.print("Node UID:         "); Serial.println(DEVICE_UID);
   Serial.print("Firmware Version: "); Serial.println(FIRMWARE_VERSION);
-  Serial.println("Streaming Mode:   Zero-SPIFFS Real-Time DMA Stream");
+  Serial.println("Mode:             Single-Shot Arm on Demand (Zero-SPIFFS Stream)");
   Serial.println("========================================================");
 
   pinMode(VIBRATION_PIN, INPUT);
-  attachInterrupt(digitalPinToInterrupt(VIBRATION_PIN), onVibrationInterrupt, FALLING);
-  Serial.print("[HARDWARE] Hardware interrupt attached to GPIO ");
-  Serial.print(VIBRATION_PIN);
-  Serial.println(" on FALLING edge with 250ms debounce & 12s cooldown guard");
+  
+  // Start in STANDBY: Sensor is NOT armed to prevent false triggers
+  g_vibrationArmed = false;
+  g_vibrationDetected = false;
 
-  // Check Wakeup Cause
-  esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
-  if (wakeup_reason == ESP_SLEEP_WAKEUP_EXT0) {
-    Serial.println("\n[EVENT] Tier 1 Triggered: Seismic / Vibration Sensor (EXT0) detected strike!");
-    recordAndTransmitAudio("VIBRATION_SENSOR_EXT0");
-
-    if (ENABLE_DEEP_SLEEP) {
-      Serial.println("[STATUS] Entering deep sleep. Re-arming vibration ext0 wake...");
-      Serial.flush();
-      esp_sleep_enable_ext0_wakeup(VIBRATION_PIN, 1);
-      esp_deep_sleep_start();
-    }
-  } else {
-    Serial.println("[STATUS] Boot / Reset complete. Listening for vibration strikes & Serial commands...");
-    Serial.println("[COMMANDS] Send 'CMD:RECORD_5S' in Serial Monitor to trigger on-demand audio capture.");
-    Serial.println("[COMMANDS] Send 'CMD:PING' in Serial Monitor to test connection.");
-  }
+  Serial.println("[STATUS] Boot complete. Vibration sensor is in STANDBY (Disarmed).");
+  Serial.println("[COMMANDS] Send 'CMD:ARM_VIBRATION' or click 'Listen' in UI to arm sensor.");
+  Serial.println("[COMMANDS] Send 'CMD:RECORD_5S' in Serial Monitor to record immediately.");
 }
 
 void loop() {
-  unsigned long now = millis();
-
-  // 1. Process hardware interrupt flag with post-recording lockout protection
-  if (g_vibrationDetected) {
+  // 1. Process vibration strike ONLY if explicitly ARMED
+  if (g_vibrationDetected && g_vibrationArmed) {
+    // Immediately disarm single-shot so it stops listening
+    g_vibrationArmed = false;
     g_vibrationDetected = false;
+    detachInterrupt(digitalPinToInterrupt(VIBRATION_PIN));
 
-    if (now >= g_cooldownUntilMs) {
-      // Detach interrupt during 5-second acquisition so continuous vibration doesn't queue duplicate recordings
-      detachInterrupt(digitalPinToInterrupt(VIBRATION_PIN));
+    Serial.println("\n========================================================");
+    Serial.println("💥 [EVENT] PHYSICAL VIBRATION STRIKE DETECTED WHILE ARMED!");
+    Serial.println("⚡ [TRIGGER] Vibration confirmed! Single-shot fired. Disarming sensor...");
+    Serial.println("========================================================");
 
-      Serial.println("\n========================================================");
-      Serial.println("💥 [EVENT] GENUINE PHYSICAL VIBRATION STRIKE DETECTED ON GPIO 34!");
-      Serial.println("⚡ [TRIGGER] Vibration interrupt fired! Starting 5-second acoustic acquisition...");
-      Serial.println("========================================================");
+    recordAndTransmitAudio("VIBRATION_ACTIVE_INTERRUPT");
 
-      recordAndTransmitAudio("VIBRATION_ACTIVE_INTERRUPT");
+    Serial.println("\n[STATUS] Vibration sensor returned to STANDBY. Click 'Listen for Vibration' in dashboard to arm next capture.");
+  }
 
-      // Arm 12-second cooldown to let all residual mechanical oscillations settle
-      g_cooldownUntilMs = millis() + POST_TRIGGER_COOLDOWN_MS;
-      g_vibrationDetected = false; // Purge residual bounces
-
-      Serial.print("[COOLDOWN] Sensor armed with 12s lockout to prevent false re-triggers until +");
-      Serial.print(POST_TRIGGER_COOLDOWN_MS / 1000);
-      Serial.println("s.");
-
-      // Re-attach hardware interrupt on FALLING edge
-      attachInterrupt(digitalPinToInterrupt(VIBRATION_PIN), onVibrationInterrupt, FALLING);
+  // 2. Track raw pin state transitions ONLY while armed (eliminates idle log spam)
+  if (g_vibrationArmed) {
+    static int lastPinState = -1;
+    int currentPinState = digitalRead(VIBRATION_PIN);
+    if (currentPinState != lastPinState) {
+      Serial.print("[SENSOR] GPIO 34 Raw Pin -> ");
+      Serial.println(currentPinState == HIGH ? "HIGH (Vibrating)" : "LOW (Idle)");
+      lastPinState = currentPinState;
     }
   }
 
-  // 2. Track raw pin state transitions for diagnostic visibility
-  static int lastPinState = -1;
-  int currentPinState = digitalRead(VIBRATION_PIN);
-  if (currentPinState != lastPinState) {
-    Serial.print("[SENSOR] GPIO 34 Raw Pin Transition -> ");
-    Serial.println(currentPinState == HIGH ? "HIGH (Vibrating / Spring Open)" : "LOW (Idle / Spring Closed)");
-    lastPinState = currentPinState;
-  }
-
-  // 3. Heartbeat log every 3.5 seconds
+  // 3. Heartbeat log every 4 seconds
   static unsigned long lastHeartbeat = 0;
-  if (millis() - lastHeartbeat >= 3500) {
+  if (millis() - lastHeartbeat >= 4000) {
     lastHeartbeat = millis();
-    Serial.print("[HEARTBEAT] Armed. GPIO 34 State: ");
-    Serial.print(currentPinState == HIGH ? "HIGH" : "LOW");
-    Serial.println(" | Awaiting physical vibration or Serial CMD:RECORD_5S...");
+    Serial.print("[HEARTBEAT] State: ");
+    if (g_vibrationArmed) {
+      Serial.println("⭐ ARMED & LISTENING for physical strike...");
+    } else {
+      Serial.println("💤 STANDBY (Disarmed - Waiting for 'Listen for Vibration' from UI)");
+    }
   }
 
-  // Process incoming Serial commands from FastAPI / Host PC
+  // 4. Process incoming Serial commands from FastAPI / Host PC
   while (Serial.available() > 0) {
     char c = Serial.read();
     if (c == '\n' || c == '\r') {
@@ -299,13 +277,26 @@ void loop() {
         Serial.print("[HOST_CMD] Received: ");
         Serial.println(inputCommandBuffer);
 
-        if (inputCommandBuffer == "CMD:RECORD_5S" || inputCommandBuffer == "RECORD") {
+        if (inputCommandBuffer == "CMD:ARM_VIBRATION" || inputCommandBuffer == "ARM" || inputCommandBuffer == "CMD:LISTEN") {
+          g_vibrationArmed = true;
+          g_vibrationDetected = false;
+          g_lastVibeInterruptMs = millis();
+          attachInterrupt(digitalPinToInterrupt(VIBRATION_PIN), onVibrationInterrupt, FALLING);
+          Serial.println("\n[ARM_ACK] ⭐ Vibration sensor is now ARMED & LISTENING for a single physical strike!");
+        } else if (inputCommandBuffer == "CMD:DISARM_VIBRATION" || inputCommandBuffer == "DISARM") {
+          g_vibrationArmed = false;
+          g_vibrationDetected = false;
+          detachInterrupt(digitalPinToInterrupt(VIBRATION_PIN));
+          Serial.println("\n[DISARM_ACK] Vibration sensor returned to STANDBY (Disarmed).");
+        } else if (inputCommandBuffer == "CMD:RECORD_5S" || inputCommandBuffer == "RECORD") {
           Serial.println("[ACK] On-demand 5s audio recording triggered by operator.");
           recordAndTransmitAudio("OPERATOR_MANUAL_COMMAND");
         } else if (inputCommandBuffer == "CMD:PING" || inputCommandBuffer == "PING") {
           Serial.println("PONG:DGN-NODE-67SF-608:ONLINE");
         } else if (inputCommandBuffer == "CMD:STATUS" || inputCommandBuffer == "STATUS") {
-          Serial.println("STATUS:OK:BATTERY=98%:MIC=INMP441:VIBE=ARMED:STREAM=DIRECT");
+          Serial.print("STATUS:OK:BATTERY=98%:MIC=INMP441:VIBE=");
+          Serial.print(g_vibrationArmed ? "ARMED" : "STANDBY");
+          Serial.println(":STREAM=DIRECT");
         } else {
           Serial.print("[WARN] Unknown command: ");
           Serial.println(inputCommandBuffer);

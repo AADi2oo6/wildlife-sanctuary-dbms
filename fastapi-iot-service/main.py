@@ -31,18 +31,16 @@ async def lifespan(app: FastAPI):
         init_event_pipeline()
         logger.info("📡 Ready to ingest IoT device telemetry and acoustic threat packets.")
 
-        # Auto-connect serial listeners for actively listening nodes
+        # Auto-connect serial listener for PRIMARY IoT node
         try:
-            from database import get_pool
+            from database import get_primary_node
             from services.serial_manager import serial_bridge
-            pool = get_pool()
-            async with pool.acquire() as conn:
-                listening_nodes = await conn.fetch("SELECT node_id, name, com_port, baud_rate FROM iot_nodes WHERE is_listening = true AND com_port IS NOT NULL;")
-                for n in listening_nodes:
-                    logger.info(f"🔄 [Startup] Auto-resuming serial listener for Node #{n['node_id']} ({n['name']}) on {n['com_port']}...")
-                    serial_bridge.connect_node(n["node_id"], n["com_port"], n["baud_rate"] or 115200)
+            primary_node = await get_primary_node()
+            if primary_node and primary_node.get("com_port"):
+                logger.info(f"🔄 [Startup] Auto-resuming serial listener for PRIMARY Node #{primary_node['node_id']} ({primary_node['name']}) on {primary_node['com_port']}...")
+                serial_bridge.connect_node(primary_node["node_id"], primary_node["com_port"], primary_node.get("baud_rate") or 115200)
         except Exception as conn_err:
-            logger.warning(f"Could not auto-resume serial listeners: {conn_err}")
+            logger.warning(f"Could not auto-resume serial listener for primary node: {conn_err}")
 
         # Start autonomous Telegram alert bot service (@DeepGreen_TheBot)
         try:

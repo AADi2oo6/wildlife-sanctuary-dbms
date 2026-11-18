@@ -192,6 +192,7 @@ model IotNode {
   camera_url        String?     @db.VarChar(255)
   camera_stream_url String?     @db.VarChar(255)
   is_listening      Boolean     @default(false)
+  is_primary        Boolean     @default(false)
   notes             String?     @db.Text
   last_ping         DateTime?   @default(now())
   created_at        DateTime    @default(now())

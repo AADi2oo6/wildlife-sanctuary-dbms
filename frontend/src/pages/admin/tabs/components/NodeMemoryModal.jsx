@@ -1064,7 +1064,7 @@ export const NodeMemoryModal = ({ node, onClose, onTriggerLogged, toast }) => {
                         <div className="flex items-center justify-between">
                           <span className="text-white/60">Classified Threat:</span>
                           <span className="font-bold text-lime-400 uppercase tracking-wide">
-                            {audioDiag.threat_category || activeInspectTrigger.trigger_type}
+                            {audioDiag.threat_type || audioDiag.threat_category || activeInspectTrigger.trigger_type}
                           </span>
                         </div>
 
@@ -1092,11 +1092,11 @@ export const NodeMemoryModal = ({ node, onClose, onTriggerLogged, toast }) => {
                           </div>
                         )}
 
-                        {audioDiag.acoustic_reasoning && (
+                        {(audioDiag.reasoning || audioDiag.acoustic_reasoning) && (
                           <div className="p-2 rounded-lg bg-black/30 border border-white/5">
                             <span className="text-[10px] uppercase font-bold text-white/50">Acoustic Diagnostics:</span>
                             <p className="text-white/80 mt-0.5 text-[11px] leading-relaxed">
-                              {audioDiag.acoustic_reasoning}
+                              {audioDiag.reasoning || audioDiag.acoustic_reasoning}
                             </p>
                           </div>
                         )}
